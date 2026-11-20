@@ -1,0 +1,183 @@
+Isolated foreign keys, duplicate keys, blocking transitions and independent orders: PASS
+CREATE TABLE `orders` (
+  `order_id` varchar(64) NOT NULL,
+  `consumer_id` varchar(64) NOT NULL,
+  `payment_status` varchar(24) NOT NULL,
+  `shipping_status` varchar(24) NOT NULL,
+  `paid_amount_fen` bigint unsigned NOT NULL,
+  `currency` char(3) NOT NULL DEFAULT 'CNY',
+  `created_at` datetime(6) NOT NULL,
+  `updated_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`order_id`),
+  KEY `idx_orders_consumer` (`consumer_id`,`order_id`),
+  CONSTRAINT `chk_order_payment` CHECK ((((`payment_status` = _utf8mb4'unpaid') and (`paid_amount_fen` = 0)) or ((`payment_status` = _utf8mb4'paid') and (`paid_amount_fen` > 0)))),
+  CONSTRAINT `chk_order_shipping` CHECK ((`shipping_status` in (_utf8mb4'unshipped',_utf8mb4'shipped')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `refunds` (
+  `refund_id` varchar(64) NOT NULL,
+  `order_id` varchar(64) NOT NULL,
+  `idempotency_key` varchar(64) DEFAULT NULL,
+  `amount_fen` bigint unsigned NOT NULL,
+  `currency` char(3) NOT NULL DEFAULT 'CNY',
+  `source` varchar(24) NOT NULL,
+  `created_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`refund_id`),
+  UNIQUE KEY `uq_refund_order` (`order_id`),
+  UNIQUE KEY `uq_refund_id_order` (`refund_id`,`order_id`),
+  UNIQUE KEY `uq_refund_key` (`idempotency_key`),
+  CONSTRAINT `fk_refund_order` FOREIGN KEY (`order_id`) REFERENCES `orders` (`order_id`),
+  CONSTRAINT `chk_refund_source` CHECK ((((`source` = _utf8mb4'seed') and (`idempotency_key` is null)) or ((`source` = _utf8mb4'execution') and (`idempotency_key` is not null))))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `refund_dispatches` (
+  `idempotency_key` varchar(64) NOT NULL,
+  `order_id` varchar(64) NOT NULL,
+  `session_id` varchar(64) NOT NULL,
+  `source_message_sequence` bigint unsigned NOT NULL,
+  `revoked_at` datetime(6) DEFAULT NULL,
+  `status` varchar(24) NOT NULL,
+  `refund_id` varchar(64) DEFAULT NULL,
+  `trace_id` varchar(64) NOT NULL,
+  `error_code` varchar(64) DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL,
+  `updated_at` datetime(6) NOT NULL,
+  `blocking_order_id` varchar(64) GENERATED ALWAYS AS ((case when (`status` in (_utf8mb4'pending',_utf8mb4'unconfirmed')) then `order_id` else NULL end)) STORED,
+  PRIMARY KEY (`idempotency_key`),
+  UNIQUE KEY `uq_dispatch_order` (`idempotency_key`,`order_id`),
+  UNIQUE KEY `uq_blocking_order` (`blocking_order_id`),
+  KEY `idx_dispatch_order_status` (`order_id`,`status`),
+  KEY `fk_dispatch_message` (`session_id`,`source_message_sequence`),
+  KEY `fk_dispatch_refund` (`refund_id`,`order_id`),
+  CONSTRAINT `fk_dispatch_message` FOREIGN KEY (`session_id`, `source_message_sequence`) REFERENCES `conversation_messages` (`session_id`, `sequence`),
+  CONSTRAINT `fk_dispatch_order` FOREIGN KEY (`order_id`) REFERENCES `orders` (`order_id`),
+  CONSTRAINT `fk_dispatch_refund` FOREIGN KEY (`refund_id`, `order_id`) REFERENCES `refunds` (`refund_id`, `order_id`),
+  CONSTRAINT `chk_dispatch_status` CHECK ((`status` in (_utf8mb4'pending',_utf8mb4'unconfirmed',_utf8mb4'succeeded',_utf8mb4'closed_no_refund')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `conversation_sessions` (
+  `session_id` varchar(64) NOT NULL,
+  `consumer_id` varchar(64) NOT NULL,
+  `created_at` datetime(6) NOT NULL,
+  `updated_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`session_id`),
+  KEY `idx_session_consumer` (`consumer_id`,`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `conversation_messages` (
+  `session_id` varchar(64) NOT NULL,
+  `sequence` bigint unsigned NOT NULL,
+  `role` varchar(24) NOT NULL,
+  `content` longtext NOT NULL,
+  `created_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`session_id`,`sequence`),
+  CONSTRAINT `fk_message_session` FOREIGN KEY (`session_id`) REFERENCES `conversation_sessions` (`session_id`),
+  CONSTRAINT `chk_message_role` CHECK ((`role` in (_utf8mb4'user',_utf8mb4'assistant')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `conversation_summaries` (
+  `session_id` varchar(64) NOT NULL,
+  `revision` int unsigned NOT NULL,
+  `covered_through_sequence` bigint unsigned NOT NULL,
+  `summary_text` longtext NOT NULL,
+  `generation_event_id` varchar(64) NOT NULL,
+  `created_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`session_id`,`revision`),
+  KEY `fk_summary_message` (`session_id`,`covered_through_sequence`),
+  CONSTRAINT `fk_summary_message` FOREIGN KEY (`session_id`, `covered_through_sequence`) REFERENCES `conversation_messages` (`session_id`, `sequence`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `consumer_preferences` (
+  `consumer_id` varchar(64) NOT NULL,
+  `preference_key` varchar(64) NOT NULL,
+  `value` varchar(255) NOT NULL,
+  `updated_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`consumer_id`,`preference_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+Two processes with independent pools: PASS
+
+Actual order_demo SHOW CREATE TABLE (MySQL 8.0.46):
+CREATE TABLE `orders` (
+  `order_id` varchar(64) NOT NULL,
+  `consumer_id` varchar(64) NOT NULL,
+  `payment_status` varchar(24) NOT NULL,
+  `shipping_status` varchar(24) NOT NULL,
+  `paid_amount_fen` bigint unsigned NOT NULL,
+  `currency` char(3) NOT NULL DEFAULT 'CNY',
+  `created_at` datetime(6) NOT NULL,
+  `updated_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`order_id`),
+  KEY `idx_orders_consumer` (`consumer_id`,`order_id`),
+  CONSTRAINT `chk_order_payment` CHECK ((((`payment_status` = _utf8mb4'unpaid') and (`paid_amount_fen` = 0)) or ((`payment_status` = _utf8mb4'paid') and (`paid_amount_fen` > 0)))),
+  CONSTRAINT `chk_order_shipping` CHECK ((`shipping_status` in (_utf8mb4'unshipped',_utf8mb4'shipped')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `refunds` (
+  `refund_id` varchar(64) NOT NULL,
+  `order_id` varchar(64) NOT NULL,
+  `idempotency_key` varchar(64) DEFAULT NULL,
+  `amount_fen` bigint unsigned NOT NULL,
+  `currency` char(3) NOT NULL DEFAULT 'CNY',
+  `source` varchar(24) NOT NULL,
+  `created_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`refund_id`),
+  UNIQUE KEY `uq_refund_order` (`order_id`),
+  UNIQUE KEY `uq_refund_id_order` (`refund_id`,`order_id`),
+  UNIQUE KEY `uq_refund_key` (`idempotency_key`),
+  KEY `fk_refund_dispatch` (`idempotency_key`,`order_id`),
+  CONSTRAINT `fk_refund_order` FOREIGN KEY (`order_id`) REFERENCES `orders` (`order_id`),
+  CONSTRAINT `chk_refund_source` CHECK ((((`source` = _utf8mb4'seed') and (`idempotency_key` is null)) or ((`source` = _utf8mb4'execution') and (`idempotency_key` is not null))))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `refund_dispatches` (
+  `idempotency_key` varchar(64) NOT NULL,
+  `order_id` varchar(64) NOT NULL,
+  `session_id` varchar(64) NOT NULL,
+  `source_message_sequence` bigint unsigned NOT NULL,
+  `revoked_at` datetime(6) DEFAULT NULL,
+  `status` varchar(24) NOT NULL,
+  `refund_id` varchar(64) DEFAULT NULL,
+  `trace_id` varchar(64) NOT NULL,
+  `error_code` varchar(64) DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL,
+  `updated_at` datetime(6) NOT NULL,
+  `blocking_order_id` varchar(64) GENERATED ALWAYS AS ((case when (`status` in (_utf8mb4'pending',_utf8mb4'unconfirmed')) then `order_id` else NULL end)) STORED,
+  PRIMARY KEY (`idempotency_key`),
+  UNIQUE KEY `uq_dispatch_order` (`idempotency_key`,`order_id`),
+  UNIQUE KEY `uq_blocking_order` (`blocking_order_id`),
+  KEY `idx_dispatch_order_status` (`order_id`,`status`),
+  KEY `fk_dispatch_message` (`session_id`,`source_message_sequence`),
+  KEY `fk_dispatch_refund` (`refund_id`,`order_id`),
+  CONSTRAINT `fk_dispatch_message` FOREIGN KEY (`session_id`, `source_message_sequence`) REFERENCES `conversation_messages` (`session_id`, `sequence`),
+  CONSTRAINT `fk_dispatch_order` FOREIGN KEY (`order_id`) REFERENCES `orders` (`order_id`),
+  CONSTRAINT `fk_dispatch_refund` FOREIGN KEY (`refund_id`, `order_id`) REFERENCES `refunds` (`refund_id`, `order_id`),
+  CONSTRAINT `chk_dispatch_status` CHECK ((`status` in (_utf8mb4'pending',_utf8mb4'unconfirmed',_utf8mb4'succeeded',_utf8mb4'closed_no_refund')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `conversation_sessions` (
+  `session_id` varchar(64) NOT NULL,
+  `consumer_id` varchar(64) NOT NULL,
+  `created_at` datetime(6) NOT NULL,
+  `updated_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`session_id`),
+  KEY `idx_session_consumer` (`consumer_id`,`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `conversation_messages` (
+  `session_id` varchar(64) NOT NULL,
+  `sequence` bigint unsigned NOT NULL,
+  `role` varchar(24) NOT NULL,
+  `content` longtext NOT NULL,
+  `created_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`session_id`,`sequence`),
+  CONSTRAINT `fk_message_session` FOREIGN KEY (`session_id`) REFERENCES `conversation_sessions` (`session_id`),
+  CONSTRAINT `chk_message_role` CHECK ((`role` in (_utf8mb4'user',_utf8mb4'assistant')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `conversation_summaries` (
+  `session_id` varchar(64) NOT NULL,
+  `revision` int unsigned NOT NULL,
+  `covered_through_sequence` bigint unsigned NOT NULL,
+  `summary_text` longtext NOT NULL,
+  `generation_event_id` varchar(64) NOT NULL,
+  `created_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`session_id`,`revision`),
+  KEY `fk_summary_message` (`session_id`,`covered_through_sequence`),
+  CONSTRAINT `fk_summary_message` FOREIGN KEY (`session_id`, `covered_through_sequence`) REFERENCES `conversation_messages` (`session_id`, `sequence`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+CREATE TABLE `consumer_preferences` (
+  `consumer_id` varchar(64) NOT NULL,
+  `preference_key` varchar(64) NOT NULL,
+  `value` varchar(255) NOT NULL,
+  `updated_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`consumer_id`,`preference_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

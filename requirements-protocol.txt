@@ -1,0 +1,14 @@
+-r requirements-checkpoint.txt
+langchain==1.5.0
+langchain-core==1.8.0
+langchain-openai==1.8.0
+openai==3.55.1
+mcp==2.3.0
+mcp-types==2.3.0
+httpx==0.28.1
+httpx2==2.16.0
+starlette==1.10.0
+uvicorn==0.54.0
+pydantic==2.14.3
+
+pymilvus==2.6.17

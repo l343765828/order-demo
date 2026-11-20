@@ -1,0 +1,6 @@
+# Versions exercised by the MySQL checkpoint compatibility test.
+-r requirements.txt
+langgraph==1.2.22
+langgraph-checkpoint==4.3.2
+langgraph-checkpoint-mysql==3.0.0
+deepagents==0.7.38
