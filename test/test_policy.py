@@ -4,8 +4,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from implementations.policy.source import parse_policy, validate_policy_source
-from mcp_service.policy.search import normalize_vector
 from model.policy.status import PolicySearchMode, PolicySearchStatus
+from utils.vectors import normalize_vector
 
 POLICY_SOURCE = Path(__file__).resolve().parents[1] / 'policy' / 'refund-policy.md'
 
@@ -20,11 +20,11 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(parse_policy(faq)[0].text, '问题？\n只有答案。')
 
     def test_vector_contract(self):
-        vector = normalize_vector([3.0] + [0.0] * 1023)
-        self.assertAlmostEqual(vector[0], 1.0)
-        for bad in ([0.0] * 1024, [float('nan')] * 1024, [1.0]):
+        vector = normalize_vector([3.0, 4.0], expected_dimensions=2)
+        self.assertEqual(vector, [0.6, 0.8])
+        for bad in ([0.0, 0.0], [float('nan'), 0.0], [1.0]):
             with self.assertRaises(ValueError):
-                normalize_vector(bad)
+                normalize_vector(bad, expected_dimensions=2)
 
     def test_entry_rejects_excess_utf8_bytes(self):
         from pydantic import ValidationError
@@ -51,9 +51,11 @@ class PolicyTests(unittest.TestCase):
 class SearchTests(unittest.TestCase):
     def test_search_failure_never_returns_unranked_candidates(self):
         from mcp_service.policy.search import search_policy
+        candidate = parse_policy('## RF-001 — 标题\n\n正文')[0]
+
         class FailedBackend:
             def embed(self, text): return [1.0] + [0.0] * 1023
-            def recall(self, vector, mode): return [{'text': 'candidate'}]
+            def recall(self, vector, mode): return [candidate]
             def rerank(self, query, candidates): raise TimeoutError()
         result = search_policy('退款', PolicySearchMode.FORMAL, FailedBackend())
         self.assertIs(result.status, PolicySearchStatus.FAILED)

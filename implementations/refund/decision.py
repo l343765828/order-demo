@@ -12,12 +12,16 @@ from utils.qwen_client import QwenChatOpenAI
 class QwenDecider(Decide):
     # 接收已配置的 Qwen 客户端和当前会话的事件记录函数。
     def __init__(self, model: QwenChatOpenAI, emit: Callable[..., None]) -> None:
+        # region 接收已配置的 Qwen 客户端和当前会话的事件记录函数
         self.model = model
         self.emit = emit
+        # endregion
 
     # 使用指定模型类约束输出，将政策选择写入当前请求的事件日志。
     def __call__(self, schema: type[Decision], prompt: str, /) -> Decision:
+        # region 使用指定模型类约束输出，将政策选择写入当前请求的事件日志
         decision = cast(Decision, self.model.with_structured_output(schema, method="json_schema", strict=True).invoke(prompt))
         if isinstance(decision, PolicySelection):
             self.emit("policy_selection", selection=decision.model_dump())
         return decision
+        # endregion

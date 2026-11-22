@@ -11,7 +11,7 @@ from model.refund.status import DemoDataCommand
 
 # 根据管理命令初始化应用表或装载演示种子。
 def manage_demo_data(command: DemoDataCommand) -> None:
-    # region 为显式管理命令建立独立数据库连接
+    # region 使用独立数据库连接初始化演示库或装载种子数据
     connection = pymysql.connect(**connection_config(), autocommit=True)
     try:
         with connection.cursor() as cursor:

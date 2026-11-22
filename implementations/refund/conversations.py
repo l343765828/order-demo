@@ -16,8 +16,10 @@ class SessionUnavailable(Exception):
 class Conversation:
     # 绑定当前会话编号与已获取的数据库连接。
     def __init__(self, connection, session_id: str):
+        # region 绑定当前会话编号与已获取的数据库连接
         self.connection = connection
         self.session_id = session_id
+        # endregion
 
     # 按消息序号读取当前会话的消费者和助手原文。
     def history(self) -> list[ExchangeMessage]:
@@ -70,7 +72,8 @@ def create_conversation(pool, consumer_id: str) -> str:
 # 核验会话归属并取得会话锁，在上下文退出时释放连接与锁。
 @contextmanager
 def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conversation]:
-    # region 验证会话编号并取得独占连接，再锁定会话和校验消费者归属
+    # region 独占会话并检查消费者归属，使用后释放数据库资源
+    # region 验证会话编号并取得用于加锁的连接
     try:
         session_id = str(UUID(session_id))
     except ValueError:
@@ -78,7 +81,9 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
     connection = pool.connection(shareable=False)
     lock = f"order_demo:conversation:{session_id}"
     locked = False
+    # endregion
     try:
+        # region 取得会话锁且归属匹配时交付会话
         with connection.cursor() as cursor:
             cursor.execute("SELECT GET_LOCK(%s, 0)", (lock,))
             locked = cursor.fetchone()[0] == 1
@@ -89,10 +94,10 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
             if row is None or row[0] != consumer_id:
                 raise SessionUnavailable
         yield Conversation(connection, session_id)
-    # endregion
+        # endregion
 
-    # region 会话使用结束或中途失败时回滚未提交事务并释放已持有的锁
     finally:
+        # region 会话结束或中途失败时回滚事务、释放锁并关闭连接
         try:
             connection.rollback()
             if locked:
@@ -100,4 +105,5 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
                     cursor.execute("SELECT RELEASE_LOCK(%s)", (lock,))
         finally:
             connection.close()
+        # endregion
     # endregion

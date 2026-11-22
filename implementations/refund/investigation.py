@@ -37,13 +37,19 @@ FetchPolicy = Callable[[PolicyQuery, str], Awaitable[PolicySearchResult]]
 # 声明订单调查的输入和真实工具事件类型。
 @overload
 async def investigate_order(model: BaseChatModel, step: InvestigationStep, trace_id: str,
-                            fetch: FetchOrder, emit: Callable[..., None]) -> OrderToolEvent | None: ...
+                            fetch: FetchOrder, emit: Callable[..., None]) -> OrderToolEvent | None:
+    # region 声明查单步骤及其工具事件类型
+    ...
+    # endregion
 
 
 # 声明政策调查的输入和真实工具事件类型。
 @overload
 async def investigate_order(model: BaseChatModel, step: PolicyStep, trace_id: str,
-                            fetch: FetchPolicy, emit: Callable[..., None]) -> PolicyToolEvent | None: ...
+                            fetch: FetchPolicy, emit: Callable[..., None]) -> PolicyToolEvent | None:
+    # region 声明政策步骤及其工具事件类型
+    ...
+    # endregion
 
 
 # 委派当前步骤对应的只读子 Agent，并仅返回已回传给模型的真实工具事件。
@@ -64,10 +70,13 @@ async def investigate_order(
     task = f"Call {name} exactly once with these exact arguments: {expected.model_dump_json()}."
     # endregion
 
+    # region 定义查单和政策检索工具及其结果记录
     # 记录被拒绝的工具调用，并生成关联原调用编号的错误消息。
     def reject(request, reason: str) -> ToolMessage:
+        # region 记录被拒绝的工具调用，并生成关联原调用编号的错误消息
         emit("agent_tool_rejected", reason=reason)
         return ToolMessage(content="Tool call disallowed.", tool_call_id=request.tool_call["id"], status="error")
+        # endregion
 
     # 调用已绑定的 MCP 工具，保存请求追踪及结构化观察。
     async def invoke_tool(args: GetOrderRequest | PolicyQuery, runtime: ToolRuntime) -> str:
@@ -95,15 +104,21 @@ async def investigate_order(
     # 提供当前消费者的精确订单查询。
     @tool(McpToolName.GET_ORDER.value)
     async def get_order(order_id: str, runtime: ToolRuntime) -> str:
+        # region 提供当前消费者的精确订单查询
         """Get the authenticated consumer's order by its exact order ID."""
         return await invoke_tool(expected, runtime)
+        # endregion
 
     # 提供政策查询，检索范围由 Host 选择。
     @tool(McpToolName.SEARCH_POLICY.value)
     async def search_policy(query: str, runtime: ToolRuntime) -> str:
+        # region 提供政策查询，检索范围由 Host 选择
         """Retrieve ranked refund policy candidates using the exact supplied query."""
         return await invoke_tool(expected, runtime)
+        # endregion
+    # endregion
 
+    # region 配置工具参数校验、结果回传核验和委派限制
     # 在转发前核对工具、参数与预算，平行调用也只能发送一次。
     @wrap_tool_call
     async def check_tool_call(request, handler):
@@ -125,8 +140,8 @@ async def investigate_order(
     # 核对回传模型的工具消息是否与实际调用编号及结果一致。
     @wrap_model_call
     async def verify_observation(request, handler):
+        # region 按调用编号和正文核对模型收到的工具结果
         nonlocal observation_returned
-        # region 已收到工具结果时，按调用编号和正文核验结果确实回传给模型
         if evidence is not None and not observation_returned:
             for msg in request.messages:
                 if isinstance(msg, ToolMessage) and msg.tool_call_id == evidence.model_tool_call_id:
@@ -136,12 +151,16 @@ async def investigate_order(
                              tool_event_id=evidence.event_id)
                     break
         # endregion
+        # region 将模型请求交给下一处理器
         return await handler(request)
+        # endregion
 
     # 限制监督 Agent 的可见工具，只允许它发起子任务委派。
     @wrap_model_call
     async def delegate_only(request, handler):
+        # region 限制监督 Agent 的可见工具，只允许它发起子任务委派
         return await handler(request.override(tools=[t for t in request.tools if t.name == "task"]))
+        # endregion
 
     # 只允许委派给当前步骤对应的子 Agent，并使用 Host 校验过的任务描述。
     @wrap_tool_call
@@ -160,6 +179,7 @@ async def investigate_order(
             **call, "args": {"description": task, "subagent_type": agent},
         }))
         # endregion
+    # endregion
 
     # region 以受限的子 Agent 和委派工具运行本次只读调查
     worker = create_agent(
@@ -199,10 +219,14 @@ def execute_order(
     step: InvestigationStep | PolicyStep, trace_id: str, emit: Callable[..., None],
     *, mode: PolicySearchMode = PolicySearchMode.CONSULTATION,
 ) -> OrderToolEvent | PolicyToolEvent | None:
+    # region 定义异步调查所需的 MCP 会话和工具绑定
     # 在异步连接生命周期内绑定当前步骤需要的 MCP 工具。
     async def run():
+        # region 载入 MCP 配置并确定本次会话的读取超时
         mcp = load_config().mcp
         read_timeout = ConnectionLimits.POLICY_SESSION_SECONDS if isinstance(step, PolicyStep) else ConnectionLimits.ORDER_CALL_SECONDS
+        # endregion
+        # region 建立 MCP 和 HTTP 连接并执行当前调查步骤
         async with httpx.AsyncClient(trust_env=False) as http, open_mcp_client(
             mcp.url, token=mcp.read_token, read_timeout_seconds=read_timeout,
         ) as client:
@@ -212,10 +236,12 @@ def execute_order(
 
                 # 绑定 Host 选择的范围并关联服务端检索事件。
                 async def fetch_policy(request: PolicyQuery, event_id: str) -> PolicySearchResult:
+                    # region 绑定 Host 选择的范围并关联服务端检索事件
                     return await policy_tool.call(SearchPolicyRequest.model_construct(query=request.query, mode=mode),
                         timeout=ConnectionLimits.POLICY_CALL_SECONDS, meta=cast(RequestParamsMeta, {
                             "trace_id": trace_id, "tool_event_id": event_id,
                         }))
+                    # endregion
 
                 return await investigate_order(create_qwen_client(load_config().qwen, http_async_client=http), step, trace_id, fetch_policy, emit)
             # endregion
@@ -225,13 +251,17 @@ def execute_order(
 
             # 携带追踪和工具事件标识，调用 MCP 查单并返回结构化结果。
             async def fetch(request: GetOrderRequest, event_id: str) -> OrderQueryResult:
+                # region 携带追踪和工具事件标识，调用 MCP 查单并返回结构化结果
                 return await bound.call(
                     request, timeout=ConnectionLimits.ORDER_CALL_SECONDS,
                     meta=cast(RequestParamsMeta, {"trace_id": trace_id, "tool_event_id": event_id}),
                 )
+                # endregion
 
             return await investigate_order(create_qwen_client(load_config().qwen, http_async_client=http), step, trace_id, fetch, emit)
             # endregion
+        # endregion
+    # endregion
 
     # region 隔离异步调查上下文，异常时只记录错误类型并返回无观察
     try:

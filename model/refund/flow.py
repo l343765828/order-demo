@@ -122,8 +122,8 @@ class TaskObservation(StrictModel):
             raise ValueError("观察必须携带一种工具结果")
         if self.policy_evidence is not None and self.policy_result is None:
             raise ValueError("订单观察不能携带政策证据")
-        # endregion
         return self
+        # endregion
 
 
 # 表示调查结束后的完成或失败决定及其原因。

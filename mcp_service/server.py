@@ -30,10 +30,12 @@ from utils.events import log_event
 
 # 将有效的事件标识规范为 UUID 字符串，无效时返回空值。
 def _event_uuid(value: object) -> str | None:
+    # region 将有效的事件标识规范为 UUID 字符串，无效时返回空值
     try:
         return str(UUID(value)) if isinstance(value, str) else None
     except ValueError:
         return None
+    # endregion
 
 
 # 定义 MCP 服务对外记录的认证、拒绝及工具结果事件。
@@ -52,11 +54,13 @@ class _RejectionReason(StrEnum):
 
 # 将工具日志与客户端追踪标识和 SDK 请求标识关联。
 def _log_tool_event(event: _McpEvent, ctx: ServerRequestContext, **fields) -> None:
+    # region 将工具日志与客户端追踪标识和 SDK 请求标识关联
     meta = ctx.meta or {}
     log_event(
         event.value, trace_id=_event_uuid(meta.get("trace_id")),
         tool_event_id=_event_uuid(meta.get("tool_event_id")), mcp_request_id=ctx.request_id, **fields,
     )
+    # endregion
 
 
 # 将 SDK 拒绝工具调用的结果记录到现有审计日志。
@@ -65,12 +69,15 @@ class _OrderMcpServer(MCPServer):
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: Context | None = None,
     ) -> types.CallToolResult | types.InputRequiredResult:
-        # region SDK 拒绝未知工具或无效参数时记录原有事件并返回工具错误
+        # region 执行 SDK 工具调用并处理可识别的拒绝结果
         try:
             return await super().call_tool(name, arguments, context)
         except ToolError as exc:
+            # region 缺少请求上下文或发生非预期工具错误时继续抛出
             if context is None or isinstance(exc, UnexpectedToolError):
                 raise
+            # endregion
+            # region 按拒绝原因记录未知工具或无效查单参数并返回工具错误
             ctx = context.request_context
             match exc.__cause__:
                 case None:
@@ -82,33 +89,39 @@ class _OrderMcpServer(MCPServer):
                 case _:
                     raise
             return types.CallToolResult(content=[], is_error=True)
+            # endregion
         # endregion
 
 
 # 创建提供查单和政策检索的只读 MCP 应用，并绑定 HTTP 访问凭据。
 def make_app(pool, token: str):
+    # region 初始化 MCP 服务和只读工具注解
     server = _OrderMcpServer("order-demo")
     read_only = types.ToolAnnotations(read_only_hint=True)
+    # endregion
 
+    # region 注册本人订单查询工具
     # 根据已认证的演示消费者身份查单，返回结构化结果供 Agent 使用。
     @server.tool(name=McpToolName.GET_ORDER.value, description="读取当前消费者本人的一笔演示订单。",
                  annotations=read_only)
     def get_order(order_id: OrderQueryId, ctx: Context) -> types.CallToolResult:
-        # region 按认证身份读取订单并记录查询结果
+        # region 查询固定演示消费者的订单并返回结构化结果
         result = query_order(pool, GetOrderRequest.model_construct(order_id=order_id), CONSUMER_ID)
         _log_tool_event(_McpEvent.GET_ORDER, ctx.request_context, status=result.status.value)
         return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
         # endregion
+    # endregion
 
+    # region 注册退款政策检索工具
     # 按 Host 指定的范围检索政策候选，并记录关联的检索事件。
     @server.tool(name=McpToolName.SEARCH_POLICY.value, description="检索当前版本退款政策候选；范围由调用方控制。",
                  annotations=read_only)
     def search_policy(
         query: PolicyQueryText, mode: PolicySearchScope, ctx: Context,
     ) -> types.CallToolResult:
+        # region 按指定范围检索政策并释放后端连接
         from mcp_service.policy.backend import PolicyBackend
 
-        # region 每次检索独立关闭后端连接，后端异常时返回失败状态及空候选
         try:
             backend = PolicyBackend()
             try:
@@ -116,21 +129,28 @@ def make_app(pool, token: str):
             finally:
                 backend.close()
         except Exception:
+            # region 后端发生异常时生成失败结果和空候选
             result = PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=str(uuid4()), candidates=[])
+            # endregion
         # endregion
 
-        # region 记录检索状态和事件编号，并返回结构化候选
+        # region 记录检索状态和事件编号并返回结构化结果
         _log_tool_event(_McpEvent.SEARCH_POLICY, ctx.request_context,
                         status=result.status.value, policy_event_id=result.event_id)
         return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
         # endregion
+    # endregion
 
+    # region 创建无状态 MCP Streamable HTTP 应用
     mcp = server.streamable_http_app(json_response=True, stateless_http=True)
+    # endregion
+
+    # region 封装 HTTP 认证并返回 ASGI 应用
     expected = f"Bearer {token}".encode("ascii")
 
-    # 只让持有有效 HTTP 凭据的调用者以固定演示消费者身份使用工具。
+    # 校验 HTTP 请求的 Bearer 凭据，放行后将 ASGI 事件交给 MCP 应用。
     async def authenticated(scope: Scope, receive: Receive, send: Send) -> None:
-        # region HTTP 凭据缺失或不匹配时拒绝请求
+        # region Authorization 请求头缺失、重复或凭据不匹配时返回 401
         if scope["type"] == "http":
             headers = Headers(scope=scope).getlist("authorization")
             if len(headers) != 1 or not compare_digest(headers[0].encode("latin-1"), expected):
@@ -138,9 +158,12 @@ def make_app(pool, token: str):
                 await Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
                 return
         # endregion
+        # region 将其余 ASGI 事件交给 MCP 应用
         await mcp(scope, receive, send)
+        # endregion
 
     return authenticated
+    # endregion
 
 
 if __name__ == "__main__":

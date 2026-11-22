@@ -47,5 +47,5 @@ class PolicyEvidence(StrictModel):
         # region 声明依据充分时至少提供一条正式政策引用
         if self.status is PolicyEvidenceStatus.SUFFICIENT and not self.citations:
             raise ValueError('充分证据必须包含正式条款')
-        # endregion
         return self
+        # endregion

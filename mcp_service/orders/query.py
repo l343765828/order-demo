@@ -5,6 +5,7 @@ from model.orders.status import OrderQueryStatus, RefundStatus
 
 # 按认证消费者与订单号查询订单及退款记录，将数据库错误转为失败结果。
 def query_order(pool, request: GetOrderRequest, authenticated_consumer_id: str) -> OrderQueryResult:
+    # region 按消费者身份读取订单及退款记录，数据库异常时返回失败
     """仅接受认证层提供的消费者身份；数据库错误不包含连接信息。"""
     try:
         # region 按可信身份限定订单并读取真实退款状态
@@ -22,9 +23,12 @@ def query_order(pool, request: GetOrderRequest, authenticated_consumer_id: str) 
         finally:
             connection.close()
         # endregion
-    # region 数据库异常时报告服务失败，找不到归属当前消费者的订单时统一隐藏详情
     except MySQLError:
+        # region 数据库查询异常时返回服务失败
         return OrderQueryResult(status=OrderQueryStatus.FAILED, error="订单服务暂时不可用")
+        # endregion
+    # endregion
+    # region 查不到本人订单时返回不可用状态
     if row is None:
         return OrderQueryResult(status=OrderQueryStatus.UNAVAILABLE)
     # endregion

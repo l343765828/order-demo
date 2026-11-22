@@ -1,4 +1,4 @@
-"""退款业务流程的固定长度上限。"""
+"""退款演示使用的固定配置和约束。"""
 
 from typing import Final
 
@@ -23,8 +23,9 @@ class ConnectionLimits:
     ORDER_CALL_SECONDS: Final[int] = 8  # 查单会话和工具调用超时秒数。
 
 
-# 统一政策向量存储和检索的约束。
+# 统一政策向量存储和检索使用的集合名称与约束。
 class PolicyLimits:
+    MILVUS_COLLECTION_NAME: Final[str] = 'order_demo_refund_policy'  # 退款政策在 Milvus 中的专用集合。
     # 政策字段在 Milvus 中允许的最大 UTF-8 字节数。
     FIELD_BYTES: Final[dict[str, int]] = {
         'chunk_id': 64, 'document_id': 64, 'title': 256, 'version': 32,

@@ -42,8 +42,8 @@ def parse_policy(source: str) -> list[PolicyEntry]:
         entries.append(entry)
     # endregion
 
-    # region 同一文档版本内出现重复条目编号时拒绝发布
+    # region 拒绝重复条目编号并返回已解析条目
     if len({e.clause_id for e in entries}) != len(entries):
         raise ValueError('政策条目编号重复')
-    # endregion
     return entries
+    # endregion

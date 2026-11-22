@@ -4,33 +4,44 @@ from pymilvus import DataType, MilvusClient
 from config import load_config
 from config.limits import PolicyLimits
 from implementations.policy.source import DOCUMENT_ID, VERSION
-from mcp_service.policy.search import COLLECTION, normalize_vector
+from interfaces.policy.search import PolicySearchBackend
 from model.policy.search import PolicyEntry, PolicyVectorRecord
 from model.policy.status import PolicyEntryType, PolicySearchMode
+from utils.vectors import normalize_vector
 
 FIELDS = list(PolicyEntry.model_fields)
 
 
 # 连接固定政策集合及配置文件中的向量、重排服务。
-class PolicyBackend:
+class PolicyBackend(PolicySearchBackend):
     # 创建独立客户端，不为模型调用暴露数据库参数。
     def __init__(self):
+        # region 创建独立客户端，不为模型调用暴露数据库参数
         policy = load_config().policy
         if policy is None:
             raise ValueError('配置文件缺少 policy 设置')
         self.client = MilvusClient(uri=policy.milvus_uri, token=policy.milvus_token, timeout=PolicyLimits.MILVUS_CONNECT_TIMEOUT_SECONDS)
         self.base = policy.model_base.rstrip('/')
+        # endregion
 
     # 关闭 Milvus 连接。
     def close(self):
+        # region 关闭 Milvus 连接
         self.client.close()
+        # endregion
 
-    # 用 BGE-M3 编码并验证响应向量。
-    def embed(self, text):
+    # 用 BGE-M3 编码文本，返回符合政策维度的归一化向量。
+    def embed(self, text: str) -> list[float]:
+        # region 请求 BGE-M3 编码并从响应中提取向量
         with httpx.Client(timeout=PolicyLimits.MODEL_TIMEOUT_SECONDS, trust_env=False) as http:
             response = http.post(self.base + '/bge/v1/embeddings', json={'model': 'BAAI/bge-m3', 'input': [text]})
             response.raise_for_status()
-            return normalize_vector(response.json()['data'][0]['embedding'])
+            values = response.json()['data'][0]['embedding']
+        # endregion
+
+        # region 按政策向量维度校验并归一化
+        return normalize_vector(values, expected_dimensions=PolicyLimits.VECTOR_DIMENSIONS)
+        # endregion
 
     # 在服务端按固定文档和当前版本过滤后召回最多八条。
     def recall(self, vector: list[float], mode: PolicySearchMode) -> list[PolicyEntry]:
@@ -46,8 +57,11 @@ class PolicyBackend:
         # endregion
 
         # region 按限定范围召回候选并核对条目契约
-        results = self.client.search(COLLECTION, data=[vector], anns_field='embedding', filter=expression,
-                                     limit=PolicyLimits.MAX_RECALLED_ENTRIES, output_fields=FIELDS, search_params={'metric_type': 'IP'}, timeout=PolicyLimits.MILVUS_SEARCH_TIMEOUT_SECONDS)
+        results = self.client.search(
+            PolicyLimits.MILVUS_COLLECTION_NAME, data=[vector], anns_field='embedding', filter=expression,
+            limit=PolicyLimits.MAX_RECALLED_ENTRIES, output_fields=FIELDS,
+            search_params={'metric_type': 'IP'}, timeout=PolicyLimits.MILVUS_SEARCH_TIMEOUT_SECONDS,
+        )
         return [PolicyEntry.model_validate(hit['entity']) for hit in results[0]]
         # endregion
 
@@ -72,8 +86,8 @@ class PolicyBackend:
     # 仅创建缺失的专用集合和固定索引；不删除已有集合。
     def create_collection(self):
         # region 已有政策集合时核对字段和索引，发现不兼容时停止发布
-        if self.client.has_collection(COLLECTION):
-            description = self.client.describe_collection(COLLECTION)
+        if self.client.has_collection(PolicyLimits.MILVUS_COLLECTION_NAME):
+            description = self.client.describe_collection(PolicyLimits.MILVUS_COLLECTION_NAME)
             fields = {field['name']: field for field in description['fields']}
             lengths = PolicyLimits.FIELD_BYTES
             if (set(fields) != set(lengths) | {'embedding'} or description['auto_id']
@@ -84,7 +98,7 @@ class PolicyBackend:
                     or fields['embedding']['type'] != DataType.FLOAT_VECTOR
                     or fields['embedding']['params']['dim'] != PolicyLimits.VECTOR_DIMENSIONS):
                 raise ValueError('现有政策集合结构不兼容')
-            index = self.client.describe_index(COLLECTION, 'embedding')
+            index = self.client.describe_index(PolicyLimits.MILVUS_COLLECTION_NAME, 'embedding')
             if index.get('index_type') != 'FLAT' or index.get('metric_type') != 'IP':
                 raise ValueError('现有政策集合索引不兼容')
             return
@@ -97,7 +111,10 @@ class PolicyBackend:
         schema.add_field('embedding', DataType.FLOAT_VECTOR, dim=PolicyLimits.VECTOR_DIMENSIONS)
         indexes = self.client.prepare_index_params()
         indexes.add_index(field_name='embedding', index_type='FLAT', metric_type='IP')
-        self.client.create_collection(COLLECTION, schema=schema, index_params=indexes, timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
+        self.client.create_collection(
+            PolicyLimits.MILVUS_COLLECTION_NAME, schema=schema, index_params=indexes,
+            timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS,
+        )
         # endregion
 
     # 只写入本演示政策条目，不触碰其他集合或历史版本。
@@ -106,6 +123,9 @@ class PolicyBackend:
         records = [PolicyVectorRecord.model_construct(**entry.model_dump(), embedding=self.embed(entry.text))
                    for entry in entries]
         self.create_collection()
-        self.client.upsert(COLLECTION, [record.model_dump(mode='json') for record in records], timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
-        self.client.flush(COLLECTION, timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
+        self.client.upsert(
+            PolicyLimits.MILVUS_COLLECTION_NAME, [record.model_dump(mode='json') for record in records],
+            timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS,
+        )
+        self.client.flush(PolicyLimits.MILVUS_COLLECTION_NAME, timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
         # endregion

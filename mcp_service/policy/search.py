@@ -1,28 +1,20 @@
-"""退款政策向量规范化、召回与重排。"""
-import math
+"""协调退款政策查询编码、召回与重排。"""
+from uuid import uuid4
+
 from config.limits import PolicyLimits
+from interfaces.policy.search import PolicySearchBackend
+from model.policy.search import PolicyCandidate, PolicySearchResult
 from model.policy.status import PolicySearchMode, PolicySearchStatus
 from utils.events import log_event
 
-COLLECTION = 'order_demo_refund_policy'
-
-
-# 验证 1024 维有限非零向量并执行 L2 归一化。
-def normalize_vector(values: list[float]) -> list[float]:
-    # region 仅对维度正确且模长有限非零的向量做归一化
-    if len(values) != PolicyLimits.VECTOR_DIMENSIONS or any(not isinstance(v, (float, int)) or not math.isfinite(v) for v in values):
-        raise ValueError('无效向量')
-    norm = math.sqrt(sum(v * v for v in values))
-    if not math.isfinite(norm) or norm == 0:
-        raise ValueError('无效向量模长')
-    return [v / norm for v in values]
-    # endregion
 
 # 完成编码、带范围过滤的召回和重排；任一阶段失败均不返回未重排内容。
-def search_policy(query, mode: PolicySearchMode, backend):
-    from uuid import uuid4
-    from model.policy.search import PolicyCandidate, PolicySearchResult
+def search_policy(query: str, mode: PolicySearchMode, backend: PolicySearchBackend) -> PolicySearchResult:
+    # region 分配本轮检索事件编号
     event_id = str(uuid4())
+    # endregion
+
+    # region 执行政策召回与重排，记录并返回检索结果
     try:
         # region 使用后端已归一化的向量召回候选，限制召回数量并在有候选时完成重排
         vector = backend.embed(query)
@@ -40,7 +32,8 @@ def search_policy(query, mode: PolicySearchMode, backend):
         return PolicySearchResult(status=PolicySearchStatus.OK, event_id=event_id,
                                   candidates=[PolicyCandidate.model_construct(**item) for item in selected])
         # endregion
-    # region 检索任一环节失败时返回失败状态和空候选
     except Exception:
+        # region 检索发生异常时返回失败状态和空候选
         return PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=event_id, candidates=[])
+        # endregion
     # endregion

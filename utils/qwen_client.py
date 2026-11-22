@@ -10,6 +10,7 @@ from config import QwenConfig
 class QwenChatOpenAI(ChatOpenAI):
     # 移除助手消息中不兼容的名称字段，并拒绝未支持的工具选择方式。
     def _get_request_payload(self, *args: Any, **kwargs: Any) -> dict:
+        # region 移除助手消息中不兼容的名称字段，并拒绝未支持的工具选择方式
         payload = super()._get_request_payload(*args, **kwargs)
         choice = payload.get("tool_choice")
         if isinstance(choice, str) and choice in {"required", "any"}:
@@ -18,10 +19,12 @@ class QwenChatOpenAI(ChatOpenAI):
             if message.get("role") == "assistant":
                 message.pop("name", None)
         return payload
+        # endregion
 
 
 # 使用配置创建 Qwen 聊天模型客户端，并接入指定的网络传输。
 def create_qwen_client(config: QwenConfig, **transport) -> QwenChatOpenAI:
+    # region 使用配置创建 Qwen 聊天模型客户端，并接入指定的网络传输
     return QwenChatOpenAI(
         model=config.model,
         base_url=config.base_url,
@@ -34,3 +37,4 @@ def create_qwen_client(config: QwenConfig, **transport) -> QwenChatOpenAI:
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         **transport,
     )
+    # endregion

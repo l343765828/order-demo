@@ -16,7 +16,9 @@ PolicySearchScope = Annotated[PolicySearchMode, BeforeValidator(PolicySearchMode
 
 # 由文档、版本和条目编号生成稳定的政策条目主键。
 def policy_chunk_id(document_id: str, version: str, clause_id: str) -> str:
+    # region 由文档、版本和条目编号生成稳定的政策条目主键
     return hashlib.sha256(f'{document_id}:{version}:{clause_id}'.encode('utf-8')).hexdigest()
+    # endregion
 
 
 # 模型可提出查询，但不能选择检索范围。
@@ -65,8 +67,8 @@ class PolicyEntry(PolicyCandidate):
             raise ValueError('政策条目超过字段字节限制')
         if self.chunk_id != policy_chunk_id(self.document_id, self.version, self.clause_id):
             raise ValueError('政策条目主键与来源不匹配')
-        # endregion
         return self
+        # endregion
 
 
 # 描述写入 Milvus 的完整政策记录，向量须为归一化的 1024 维有限数。
@@ -84,8 +86,8 @@ class PolicyVectorRecord(PolicyEntry):
         norm = math.sqrt(sum(value * value for value in values))
         if not math.isfinite(norm) or abs(norm - 1) > PolicyLimits.VECTOR_NORM_TOLERANCE:
             raise ValueError('政策向量未归一化')
-        # endregion
         return values
+        # endregion
 
 
 # 区分检索失败和成功，并携带检索事件编号。
@@ -101,6 +103,7 @@ class PolicySearchResult(BaseModel):
     # 将 SDK 接收的检索结果恢复为具名模型和业务枚举。
     @classmethod
     def from_mcp(cls, data: dict[str, Any]) -> Self:
+        # region 将 SDK 接收的检索结果恢复为具名模型和业务枚举
         return cls.model_construct(
             status=PolicySearchStatus(data['status']), event_id=data['event_id'],
             candidates=[
@@ -111,6 +114,7 @@ class PolicySearchResult(BaseModel):
                 for item in data['candidates']
             ],
         )
+        # endregion
 
     # 检索失败时禁止将候选误认为可靠结果。
     @model_validator(mode='after')
@@ -118,7 +122,7 @@ class PolicySearchResult(BaseModel):
         # region 检索失败时只允许空候选列表
         if self.status is PolicySearchStatus.FAILED and self.candidates:
             raise ValueError('检索失败不得返回候选')
-        # endregion
         return self
+        # endregion
 
 # 接口调用者负责确保办理任务始终使用 formal；模型不得自行放宽范围。

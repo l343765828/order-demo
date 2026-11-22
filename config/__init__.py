@@ -74,12 +74,16 @@ class AppConfig:
 
 # 读取并校验指定 JSON 配置，返回应用配置；错误信息不包含配置值。
 def load_config(path: str | Path | None = None) -> AppConfig:
+    # region 加载并校验应用配置，失败时报告文件路径
     source = Path(path) if path is not None else _config_path
     try:
+        # region 读取 JSON 并构造配置对象
         data = json.loads(source.read_text(encoding="utf-8"))
         config = AppConfig(mysql=MySQLConfig(**data["mysql"]), mcp=MCPConfig(**data["mcp"]),
                            qwen=QwenConfig(**data["qwen"]),
                            policy=PolicyConfig(**data["policy"]) if "policy" in data else None)
+        # endregion
+        # region 校验连接字段、端口、模型限制和可选政策配置
         if (not all(isinstance(value, str) and value for value in (
                 config.mysql.host, config.mysql.user, config.mysql.password, config.mcp.url,
                 config.mcp.read_token, config.mcp.host, config.qwen.base_url,
@@ -93,14 +97,22 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 config.policy.milvus_uri, config.policy.milvus_token, config.policy.model_base)):
             raise ValueError
         token = config.mcp.read_token
+        # endregion
+        # region 校验 MCP 凭据后返回配置
         if len(token) < 32 or not token.isascii() or not token.isprintable() or any(c.isspace() for c in token):
             raise ValueError
         return config
+        # endregion
     except (OSError, ValueError, TypeError, KeyError):
+        # region 配置无法读取、解析或校验时抛出统一错误
         raise ValueError(f"无法加载配置 {source}，请检查 JSON 字段和取值。") from None
+        # endregion
+    # endregion
 
 
 # 设置后续加载配置时使用的路径，未指定时恢复默认路径。
 def use_config(path: str | Path | None) -> None:
+    # region 设置后续加载配置时使用的路径，未指定时恢复默认路径
     global _config_path
     _config_path = Path(path) if path else DEFAULT_PATH
+    # endregion

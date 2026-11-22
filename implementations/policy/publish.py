@@ -14,11 +14,11 @@ def publish_policy() -> int:
         raise ValueError('政策源条目不完整')
     # endregion
 
-    # region 显式发布验证后的政策条目并释放后端连接
+    # region 发布已校验条目，释放后端连接并返回条数
     backend = PolicyBackend()
     try:
         backend.publish(entries)
     finally:
         backend.close()
-    # endregion
     return len(entries)
+    # endregion

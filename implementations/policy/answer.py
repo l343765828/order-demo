@@ -20,10 +20,12 @@ NO_EVIDENCE = "当前政策文档未说明，暂无法给出有依据的回答�
 # 用发布源校验实际检索候选的身份和原文。
 @lru_cache(maxsize=1)
 def published_clauses() -> dict[str, PolicyCandidate]:
+    # region 读取发布源并建立按条目编号索引的候选表
     source = SOURCE_PATH.read_text(encoding="utf-8")
     validate_policy_source(source)
     return {entry.clause_id: PolicyCandidate.model_construct(**entry.model_dump(exclude={"chunk_id"}))
             for entry in parse_policy(source)}
+    # endregion
 
 
 # 按可信订单事实确定所需条款、检索查询和资格解释。
@@ -55,15 +57,16 @@ def answer_policy(decide: Decide, question: str, query: str, results: list[Polic
     selected: list[int] = []
     # endregion
 
-    # region 取得订单事实时，仅采用适用于实际订单状态的正式条款
+    # region 按订单资格或通用咨询选择适用政策依据
     if order is not None:
+        # region 有订单事实时选择适用的正式条款并生成资格解释
         required_clause, retry, explanation = eligibility(order)
         selected = [i for i in formal if usable[i][1].clause_id == required_clause][:1]
         answer = f"订单 {order.order_id}：{explanation} 本轮仅解释资格。"
-    # endregion
+        # endregion
 
-    # region 通用咨询有可用候选时，模型选择相关条目，Host 核对正式依据
     elif usable:
+        # region 通用咨询有可用候选时请模型选择，Host 核对正式出处
         first = results[0].candidates[:1]
         options = {i: item.text for i, (event, item) in enumerate(usable)
                    if i in formal or (first and event == results[0].event_id and item == first[0])}
@@ -83,21 +86,29 @@ def answer_policy(decide: Decide, question: str, query: str, results: list[Polic
             body = item.text.split("\n", 1)[-1]
             match item.entry_type:
                 case PolicyEntryType.POLICY:
+                    # region 选中正式条款时采用该条款原文
                     selected = [index]
                     answer = body
+                    # endregion
                 case PolicyEntryType.FAQ:
-                    # FAQ 的全部正式出处在本轮齐备时才采用答案，发现缺失时生成补查文本。
+                    # region 选中 FAQ 时核对本轮是否取齐其正式出处
                     content, marker, refs = body.partition("依据：")
                     required = [part.strip(" 。") for part in refs.split("、") if part.strip(" 。")]
                     available = {usable[i][1].clause_id: i for i in reversed(formal)}
                     missing = [clause for clause in required if clause not in available]
                     if marker and required and not missing:
+                        # region 正式出处齐备时采用 FAQ 正文并引用对应条款
                         selected = [available[clause] for clause in required]
                         answer = content.strip()
+                        # endregion
                     elif marker and missing:
+                        # region 正式出处缺失时生成补查文本
                         descriptions = " ".join(clauses[clause].text
                                                 for clause in missing if clause in clauses)
                         retry = descriptions or " ".join(missing)
+                        # endregion
+                    # endregion
+        # endregion
     # endregion
 
     # region 回答及引用通过核验时输出政策依据，否则提供正式条款补查文本
@@ -109,7 +120,11 @@ def answer_policy(decide: Decide, question: str, query: str, results: list[Polic
                               status=PolicyEvidenceStatus.SUFFICIENT if citations else PolicyEvidenceStatus.INSUFFICIENT,
                               citations=citations)
     if answer and verify_policy_evidence(evidence, results):
+        # region 存在答案且引用核验通过时输出答复与出处
         identifiers = "、".join(c.clause_id for c in citations)
         return f"{answer}\n依据：《{TITLE}》{identifiers}。", evidence, None
+        # endregion
+    # region 缺少可核验答复时返回限长补查文本
     return None, evidence, (retry or f"正式退款条款：{query}")[:RefundLimits.MAX_POLICY_QUERY_CHARS]
+    # endregion
     # endregion

@@ -57,7 +57,9 @@ class OrderQueryResult(StrictModel):
                 paid_amount_fen=details["paid_amount_fen"], currency=details["currency"],
             )
         # endregion
+        # region 还原查单状态及可选订单详情和错误信息
         return cls.model_construct(status=OrderQueryStatus(data["status"]), order=order, error=data.get("error"))
+        # endregion
 
     # 校验查询状态、订单详情与错误信息之间的对应关系。
     @model_validator(mode="after")
