@@ -7,7 +7,7 @@
 ```powershell
 .venv/Scripts/python.exe order-demo/test/verify_policy_cli.py --config <JSON配置路径> --evidence order-demo/evidence/policy-06-final-events.jsonl
 .venv/Scripts/python.exe -m pytest order-demo/test -q --tb=short
-.venv/Scripts/python.exe -m mypy --ignore-missing-imports --check-untyped-defs order-demo/model/order_flow.py order-demo/model/policy_evidence.py order-demo/order_agent.py order-demo/order_flow.py order-demo/policy_answer.py order-demo/cli.py
+.venv/Scripts/python.exe -m mypy --ignore-missing-imports --check-untyped-defs order-demo/model/refund/flow.py order-demo/model/policy/evidence.py order-demo/order_agent.py order-demo/order_flow.py order-demo/policy_answer.py order-demo/cli.py
 .venv/Scripts/python.exe -m compileall -q order-demo
 .venv/Scripts/python.exe -m pip check
 ```

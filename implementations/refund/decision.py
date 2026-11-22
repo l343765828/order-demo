@@ -1,0 +1,23 @@
+"""通过 Qwen 生成退款业务流程的结构化决定。"""
+
+from collections.abc import Callable
+
+from interfaces.refund.decision import Decide, Decision
+from model.policy.evidence import PolicySelection
+from qwen_client import QwenChatOpenAI
+
+
+# 为退款业务流程调用 Qwen，校验模型决定并记录政策依据的选择结果。
+class QwenDecider(Decide):
+    # 接收已配置的 Qwen 客户端和当前会话的事件记录函数。
+    def __init__(self, model: QwenChatOpenAI, emit: Callable[..., None]) -> None:
+        self.model = model
+        self.emit = emit
+
+    # 使用指定模型类约束输出，将政策选择写入当前请求的事件日志。
+    def __call__(self, schema: type[Decision], prompt: str, /) -> Decision:
+        result = self.model.with_structured_output(schema, method="json_schema", strict=True).invoke(prompt)
+        decision = schema.model_validate(result)
+        if isinstance(decision, PolicySelection):
+            self.emit("policy_selection", selection=decision.model_dump())
+        return decision

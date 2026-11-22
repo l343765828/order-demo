@@ -5,7 +5,7 @@ from pathlib import Path
 import pymysql
 from config import use_config
 from model import connection_config
-from model.status import PaymentStatus, ShippingStatus
+from model.orders.status import PaymentStatus, ShippingStatus
 
 
 # 解析管理命令，显式初始化演示数据库结构或装载种子数据。
@@ -15,10 +15,11 @@ def main():
     parser.add_argument("command", choices=("init", "seed"))
     args = parser.parse_args()
     use_config(args.config)
-    # region 显式创建库和应用表
+    # region 为显式管理命令建立独立数据库连接
     connection = pymysql.connect(**connection_config(), autocommit=True)
     try:
         with connection.cursor() as cursor:
+            # region init 补齐缺失的演示库、应用表和退款外键
             if args.command == "init":
                 cursor.execute("CREATE DATABASE IF NOT EXISTS order_demo CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
                 cursor.execute("USE order_demo")
@@ -28,6 +29,9 @@ def main():
                 cursor.execute("SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='fk_dispatch_refund'")
                 if not cursor.fetchone()[0]:
                     cursor.execute("ALTER TABLE refund_dispatches ADD CONSTRAINT fk_dispatch_refund FOREIGN KEY (refund_id, order_id) REFERENCES refunds(refund_id, order_id)")
+            # endregion
+
+            # region seed 保留已有订单，仅为本次新插入的指定订单写入种子退款
             else:
                 cursor.execute("USE order_demo")
                 # 已有业务记录优先；重装种子不会覆盖订单或退款。
@@ -47,6 +51,7 @@ def main():
                 except Exception:
                     connection.rollback()
                     raise
+            # endregion
     finally:
         connection.close()
     # endregion

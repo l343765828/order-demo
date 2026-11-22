@@ -9,13 +9,11 @@ import time
 import tempfile
 from pathlib import Path
 import httpx2
-from mcp import Client
-from mcp.client.streamable_http import streamable_http_client
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from model.policy import SearchPolicyRequest, PolicySearchResult
-from model.status import PolicySearchStatus
+from model.policy.search import SearchPolicyRequest, PolicySearchResult
+from model.policy.status import PolicySearchStatus
 from config import DEFAULT_PATH
-from utils.mcp_client import bind_mcp_tool, controlled_mcp_http
+from utils.mcp_client import bind_mcp_tool, open_mcp_client
 from utils.policy_tool import make_policy_tool
 
 
@@ -23,23 +21,21 @@ async def verify(url, token, expect_failure):
     async with httpx2.AsyncClient(trust_env=False) as http:
         response = await http.post(url, json={})
         assert response.status_code == 401
-    async with controlled_mcp_http() as http:
-        http.headers['Authorization'] = 'Bearer ' + token
-        async with Client(streamable_http_client(url, http_client=http), read_timeout_seconds=90) as client:
-            tool = await bind_mcp_tool(client, 'search_policy', SearchPolicyRequest, PolicySearchResult)
-            if expect_failure:
-                result = await tool.call({'query':'退款', 'mode':'formal'}, timeout=60)
-                assert result.status is PolicySearchStatus.FAILED and not result.candidates
-                print('milvus unavailable: failed, empty candidates, event=', result.event_id)
-                return
-            for mode, query in (('consultation', '已支付但没发货可以退款吗'),
-                                ('formal', '已支付但没发货可以退款吗'),
-                                ('consultation', '会员积分如何兑换航空里程')):
-                result = PolicySearchResult.model_validate(await make_policy_tool(tool, mode).ainvoke({'query':query}))
-                assert result.status is PolicySearchStatus.OK and result.candidates
-                assert all(c.version == '1.0' for c in result.candidates)
-                if mode == 'formal': assert all(c.entry_type == 'policy' for c in result.candidates)
-                print(mode, query.encode('unicode_escape').decode(), result.model_dump_json(ensure_ascii=True))
+    async with open_mcp_client(url, token=token, read_timeout_seconds=90) as client:
+        tool = await bind_mcp_tool(client, 'search_policy', SearchPolicyRequest, PolicySearchResult)
+        if expect_failure:
+            result = await tool.call({'query':'退款', 'mode':'formal'}, timeout=60)
+            assert result.status is PolicySearchStatus.FAILED and not result.candidates
+            print('milvus unavailable: failed, empty candidates, event=', result.event_id)
+            return
+        for mode, query in (('consultation', '已支付但没发货可以退款吗'),
+                            ('formal', '已支付但没发货可以退款吗'),
+                            ('consultation', '会员积分如何兑换航空里程')):
+            result = PolicySearchResult.model_validate(await make_policy_tool(tool, mode).ainvoke({'query':query}))
+            assert result.status is PolicySearchStatus.OK and result.candidates
+            assert all(c.version == '1.0' for c in result.candidates)
+            if mode == 'formal': assert all(c.entry_type == 'policy' for c in result.candidates)
+            print(mode, query.encode('unicode_escape').decode(), result.model_dump_json(ensure_ascii=True))
 
 
 def main():

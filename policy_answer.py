@@ -3,16 +3,15 @@
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from interfaces.refund.decision import Decide
 from mcp_service.policy import TITLE, parse_policy, validate_policy_source
-from model.order_query import OrderDetails
-from model.policy import PolicyCandidate, PolicySearchResult
-from model.policy_evidence import PolicyCitation, PolicyEvidence, PolicySelection, verify_policy_evidence
-from model.status import PaymentStatus, PolicyEntryType, PolicyEvidenceStatus, PolicySearchStatus, RefundStatus, ShippingStatus
-
-if TYPE_CHECKING:
-    from order_flow import Decide
+from config.limits import RefundLimits
+from model.orders.query import OrderDetails
+from model.policy.search import PolicyCandidate, PolicySearchResult
+from model.policy.evidence import PolicyCitation, PolicyEvidence, PolicySelection, verify_policy_evidence
+from model.orders.status import PaymentStatus, RefundStatus, ShippingStatus
+from model.policy.status import PolicyEntryType, PolicyEvidenceStatus, PolicySearchStatus
 
 POLICY_UNAVAILABLE = "暂时无法核实退款政策，请稍后再试。"
 NO_EVIDENCE = "当前政策文档未说明，暂无法给出有依据的回答。"
@@ -30,18 +29,24 @@ def published_clauses() -> dict[str, PolicyCandidate]:
 
 # 按可信订单事实确定所需条款、检索查询和资格解释。
 def eligibility(order: OrderDetails) -> tuple[str, str, str]:
+    # region 已退款优先提示不可重复办理，未支付或已发货时引用限制条款
     if order.refund_status is RefundStatus.REFUNDED:
         return "RF-009", "订单已完成模拟退款，不重复办理", "已有模拟退款记录，不能再次办理。"
     if order.payment_status is PaymentStatus.UNPAID:
         return "RF-004", "未支付的订单没有已支付款项，不办理退款", "未支付，没有可退款的款项。"
     if order.shipping_status is ShippingStatus.SHIPPED:
         return "RF-004", "已发货的订单超出退款范围，不办理退款", "已发货，超出演示退款范围。"
+    # endregion
+
+    # region 已支付且未发货、尚未退款时说明整单原路退款条件
     return "RF-003", "本人订单已支付未发货尚未退款，整单原路退款", "已支付、未发货且尚未退款，符合整单原路退款条件。"
+    # endregion
 
 
 # 按核验过的候选构建回答和引用，模型只选择候选序号。
-def answer_policy(decide: "Decide", question: str, query: str, results: list[PolicySearchResult],
+def answer_policy(decide: Decide, question: str, query: str, results: list[PolicySearchResult],
                   order: OrderDetails | None) -> tuple[str | None, PolicyEvidence, str | None]:
+    # region 保留本轮成功检索且与当前发布原文一致的候选，标记其中的正式条款
     clauses = published_clauses()
     usable = [(result.event_id, item) for result in results if result.status is PolicySearchStatus.OK
               for item in result.candidates if clauses.get(item.clause_id) == item]
@@ -49,10 +54,16 @@ def answer_policy(decide: "Decide", question: str, query: str, results: list[Pol
     retry = None
     answer = None
     selected: list[int] = []
+    # endregion
+
+    # region 取得订单事实时，仅采用适用于实际订单状态的正式条款
     if order is not None:
         required_clause, retry, explanation = eligibility(order)
         selected = [i for i in formal if usable[i][1].clause_id == required_clause][:1]
         answer = f"订单 {order.order_id}：{explanation} 本轮仅解释资格。"
+    # endregion
+
+    # region 通用咨询有可用候选时，模型选择相关条目，Host 核对正式依据
     elif usable:
         first = results[0].candidates[:1]
         options = {i: item.text for i, (event, item) in enumerate(usable)
@@ -71,22 +82,26 @@ def answer_policy(decide: "Decide", question: str, query: str, results: list[Pol
         if index is not None and index in options:
             item = usable[index][1]
             body = item.text.split("\n", 1)[-1]
-            if item.entry_type is PolicyEntryType.POLICY:
-                selected = [index]
-                answer = body
-            elif item.entry_type is PolicyEntryType.FAQ:
-                content, marker, refs = body.partition("依据：")
-                required = [part.strip(" 。") for part in refs.split("、") if part.strip(" 。")]
-                available = {usable[i][1].clause_id: i for i in reversed(formal)}
-                missing = [clause for clause in required if clause not in available]
-                if marker and required and not missing:
-                    selected = [available[clause] for clause in required]
-                    answer = content.strip()
-                elif marker and missing:
-                    descriptions = " ".join(clauses[clause].text
-                                            for clause in missing if clause in clauses)
-                    retry = descriptions or " ".join(missing)
+            match item.entry_type:
+                case PolicyEntryType.POLICY:
+                    selected = [index]
+                    answer = body
+                case PolicyEntryType.FAQ:
+                    # FAQ 的全部正式出处在本轮齐备时才采用答案，发现缺失时生成补查文本。
+                    content, marker, refs = body.partition("依据：")
+                    required = [part.strip(" 。") for part in refs.split("、") if part.strip(" 。")]
+                    available = {usable[i][1].clause_id: i for i in reversed(formal)}
+                    missing = [clause for clause in required if clause not in available]
+                    if marker and required and not missing:
+                        selected = [available[clause] for clause in required]
+                        answer = content.strip()
+                    elif marker and missing:
+                        descriptions = " ".join(clauses[clause].text
+                                                for clause in missing if clause in clauses)
+                        retry = descriptions or " ".join(missing)
+    # endregion
 
+    # region 回答及引用通过核验时输出政策依据，否则提供正式条款补查文本
     citations = [PolicyCitation(event_id=usable[i][0], document_id=usable[i][1].document_id,
                                version=usable[i][1].version, clause_id=usable[i][1].clause_id,
                                excerpt=usable[i][1].text)
@@ -97,4 +112,5 @@ def answer_policy(decide: "Decide", question: str, query: str, results: list[Pol
     if answer and verify_policy_evidence(evidence, results):
         identifiers = "、".join(c.clause_id for c in citations)
         return f"{answer}\n依据：《{TITLE}》{identifiers}。", evidence, None
-    return None, evidence, (retry or f"正式退款条款：{query}")[:2000]
+    return None, evidence, (retry or f"正式退款条款：{query}")[:RefundLimits.MAX_POLICY_QUERY_CHARS]
+    # endregion

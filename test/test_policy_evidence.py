@@ -5,11 +5,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pydantic import ValidationError
 import pytest
 
-from model.policy import PolicyCandidate, PolicySearchResult
-from model.policy_evidence import PolicyCitation, PolicyEvidence, verify_policy_evidence
-from model.order_flow import OrderToolEvent, PolicyToolEvent
-from model.order_query import OrderQueryResult
-from model.status import PolicyEvidenceStatus, PolicySearchStatus
+from model.policy.search import PolicyCandidate, PolicySearchResult
+from model.policy.evidence import PolicyCitation, PolicyEvidence, verify_policy_evidence
+from model.refund.flow import OrderToolEvent, PolicyToolEvent
+from model.orders.query import OrderQueryResult
+from model.policy.status import PolicyEvidenceStatus, PolicySearchStatus
 from order_flow import build_graph
 from policy_answer import NO_EVIDENCE, POLICY_UNAVAILABLE, published_clauses
 

@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from uuid import UUID, uuid4
 
-from model.order_flow import ExchangeMessage
+from model.refund.flow import ExchangeMessage
 
 
 # 表示会话不存在、消费者归属不匹配或会话正被占用。
@@ -21,12 +21,14 @@ class Conversation:
 
     # 按消息序号读取当前会话的消费者和助手原文。
     def history(self) -> list[ExchangeMessage]:
+        # region 按会话编号限定读取范围并按原始序号恢复消息
         with self.connection.cursor() as cursor:
             cursor.execute(
                 "SELECT role, content FROM conversation_messages WHERE session_id=%s ORDER BY sequence",
                 (self.session_id,),
             )
             return [ExchangeMessage(role=role, content=content) for role, content in cursor.fetchall()]
+        # endregion
 
     # 为当前会话分配下一消息序号，写入原文并提交事务。
     def append(self, message: ExchangeMessage) -> None:
@@ -48,6 +50,7 @@ class Conversation:
 
 # 为指定消费者创建会话并返回新的会话编号。
 def create_conversation(pool, consumer_id: str) -> str:
+    # region 生成独立会话编号，绑定消费者并提交后供本轮使用
     session_id = str(uuid4())
     connection = pool.connection()
     try:
@@ -61,12 +64,13 @@ def create_conversation(pool, consumer_id: str) -> str:
     finally:
         connection.close()
     return session_id
+    # endregion
 
 
 # 核验会话归属并取得会话锁，在上下文退出时释放连接与锁。
 @contextmanager
 def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conversation]:
-    # region 校验会话归属，在读取原文和 checkpoint 前串行化同会话调用
+    # region 验证会话编号并取得独占连接，再锁定会话和校验消费者归属
     try:
         session_id = str(UUID(session_id))
     except ValueError:
@@ -84,8 +88,10 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
             row = cursor.fetchone()
             if row is None or row[0] != consumer_id:
                 raise SessionUnavailable
-        # endregion
         yield Conversation(connection, session_id)
+    # endregion
+
+    # region 会话使用结束或中途失败时回滚未提交事务并释放已持有的锁
     finally:
         try:
             connection.rollback()
@@ -94,3 +100,4 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
                     cursor.execute("SELECT RELEASE_LOCK(%s)", (lock,))
         finally:
             connection.close()
+    # endregion

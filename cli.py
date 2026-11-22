@@ -12,12 +12,20 @@ from langchain_core.runnables import RunnableConfig
 
 from config import use_config
 from conversations import SessionUnavailable, create_conversation, open_conversation
+from implementations.refund.decision import QwenDecider
 from model import connection_config, create_pool
 from order_agent import execute_order, qwen
-from model.order_flow import ExchangeMessage, InvestigationStep, OrderState, OrderToolEvent, OrderTurn, PolicyStep, PolicyToolEvent
-from model.policy_evidence import PolicySelection
-from model.status import PolicySearchMode
-from order_flow import Decision, build_graph
+from model.refund.flow import (
+    ExchangeMessage,
+    InvestigationStep,
+    OrderState,
+    OrderToolEvent,
+    OrderTurn,
+    PolicyStep,
+    PolicyToolEvent,
+)
+from model.policy.status import PolicySearchMode
+from order_flow import build_graph
 from order_runtime import CONSUMER_ID, log_event, read_token
 
 
@@ -69,14 +77,6 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
     def emit(event: str, **fields) -> None:
         log_event(event, session_id=session_id, trace_id=trace_id, **fields)
 
-    # 调用模型并按指定数据模型校验意图、计划或重规划结果。
-    def decide(schema: type[Decision], prompt: str) -> Decision:
-        result = model.with_structured_output(schema, method="json_schema", strict=True).invoke(prompt)
-        decision = schema.model_validate(result)
-        if isinstance(decision, PolicySelection):
-            emit("policy_selection", selection=decision.model_dump())
-        return decision
-
     # 将已验证的查单步骤交给订单调查执行器。
     def investigate(step: InvestigationStep, trace_id: str) -> OrderToolEvent | None:
         event = execute_order(step, trace_id, emit)
@@ -87,8 +87,8 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
         event = execute_order(step, trace_id, emit, mode=mode)
         return event if isinstance(event, PolicyToolEvent) else None
 
-    graph = build_graph(decide, investigate, emit, saver, search=search)
-    # region 先核对归属，再以应用会话 ID 读取 checkpoint；不恢复执行中断的图
+    graph = build_graph(QwenDecider(model, emit), investigate, emit, saver, search=search)
+    # region 会话归属校验通过后，按会话编号载入原文和 checkpoint 供后续输入使用
     with open_conversation(pool, session_id, CONSUMER_ID) as conversation:
         session_id = conversation.session_id
         config: RunnableConfig = {"configurable": {"thread_id": session_id}}
@@ -100,10 +100,12 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
              pending_nodes=list(snapshot.next))
     # endregion
     print(f"会话：{session_id}", flush=True)
+    # region 仅请求历史时，输出已保存原文并结束本次命令
     if args.history:
         for stored in history:
             print(f"{stored.role}：{stored.content}")
         return 0
+    # endregion
 
     while True:
         try:
@@ -111,7 +113,7 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
         except (EOFError, KeyboardInterrupt):
             return 0
         if message.strip():
-            # region 先保存消费者原文，图运行结束后保存实际助手回复
+            # region 收到非空消息时持有会话锁，先保存消费者原文再执行流程并保存回复
             with open_conversation(pool, session_id, CONSUMER_ID) as conversation:
                 trace_id = str(uuid4())
                 conversation.append(ExchangeMessage(role="user", content=message))

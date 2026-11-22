@@ -1,11 +1,15 @@
-"""发现并校验 MCP 工具，使用受控连接执行单次调用。"""
+"""管理 MCP 会话，校验工具契约并执行单次调用。"""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Generic, TypeVar
 
 import httpx2
 from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.types import RequestParamsMeta
 from pydantic import BaseModel
+from config.limits import ConnectionLimits
 
 Result = TypeVar("Result", bound=BaseModel)
 
@@ -14,7 +18,17 @@ Result = TypeVar("Result", bound=BaseModel)
 def controlled_mcp_http() -> httpx2.AsyncClient:
     """创建受控连接；调用方负责用 async with 关闭。"""
     # MCP SDK 独立处理跳转，必须将 max_redirects 设为 0 才能阻止跳转重发 POST。
-    return httpx2.AsyncClient(max_redirects=0, trust_env=False, timeout=90)
+    return httpx2.AsyncClient(max_redirects=0, trust_env=False, timeout=ConnectionLimits.MCP_HTTP_SECONDS)
+
+
+# 通过指定服务地址和只读凭据建立 MCP 会话，退出时先关闭会话，再关闭 HTTP 连接。
+@asynccontextmanager
+async def open_mcp_client(url: str, *, token: str, read_timeout_seconds: float) -> AsyncIterator[Client]:
+    async with controlled_mcp_http() as http:
+        http.headers["Authorization"] = f"Bearer {token}"
+        transport = streamable_http_client(url, http_client=http)
+        async with Client(transport, read_timeout_seconds=read_timeout_seconds) as client:
+            yield client
 
 
 # 保存已校验输入输出契约的 MCP 工具及当前会话。

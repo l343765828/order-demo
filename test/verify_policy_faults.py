@@ -11,13 +11,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import httpx
-from mcp import Client
-from mcp.client.streamable_http import streamable_http_client
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from model.policy import SearchPolicyRequest, PolicySearchResult
-from model.status import PolicySearchStatus
+from model.policy.search import SearchPolicyRequest, PolicySearchResult
+from model.policy.status import PolicySearchStatus
 from config import DEFAULT_PATH
-from utils.mcp_client import bind_mcp_tool, controlled_mcp_http
+from utils.mcp_client import bind_mcp_tool, open_mcp_client
 
 mode = 'invalid_vector'
 counts = {'embedding': 0, 'rerank': 0}
@@ -46,17 +44,15 @@ class Proxy(BaseHTTPRequestHandler):
 
 async def verify(url):
     global mode
-    async with controlled_mcp_http() as http:
-        http.headers['Authorization'] = 'Bearer ' + 'x'*40
-        async with Client(streamable_http_client(url, http_client=http), read_timeout_seconds=60) as client:
-            tool = await bind_mcp_tool(client, 'search_policy', SearchPolicyRequest, PolicySearchResult)
-            for mode in ('invalid_vector','rerank_failure','rerank_timeout'):
-                before = counts.copy()
-                result = await tool.call({'query':'未发货能退款吗','mode':'formal'})
-                assert result.status is PolicySearchStatus.FAILED and not result.candidates
-                delta = {k:counts[k]-before[k] for k in counts}
-                assert delta == ({'embedding':1,'rerank':0} if mode == 'invalid_vector' else {'embedding':1,'rerank':1})
-                print(mode, 'event=',result.event_id, 'calls=',delta, flush=True)
+    async with open_mcp_client(url, token='x'*40, read_timeout_seconds=60) as client:
+        tool = await bind_mcp_tool(client, 'search_policy', SearchPolicyRequest, PolicySearchResult)
+        for mode in ('invalid_vector','rerank_failure','rerank_timeout'):
+            before = counts.copy()
+            result = await tool.call({'query':'未发货能退款吗','mode':'formal'})
+            assert result.status is PolicySearchStatus.FAILED and not result.candidates
+            delta = {k:counts[k]-before[k] for k in counts}
+            assert delta == ({'embedding':1,'rerank':0} if mode == 'invalid_vector' else {'embedding':1,'rerank':1})
+            print(mode, 'event=',result.event_id, 'calls=',delta, flush=True)
 
 def main():
     global model_base

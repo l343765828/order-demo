@@ -10,14 +10,14 @@ from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from order_agent import investigate_order
-from model.order_flow import ExchangeMessage, InvestigationStep, OrderState, OrderToolEvent, OrderTurn
+from model.refund.flow import ExchangeMessage, InvestigationStep, OrderState, OrderToolEvent, OrderTurn
 from order_flow import build_graph
-from model.order_query import GetOrderRequest, OrderQueryResult
-from model.status import ConversationIntent, OrderGoal, ReplanAction
+from model.orders.query import GetOrderRequest, OrderQueryResult
+from model.refund.status import ConversationIntent, OrderGoal, ReplanAction
 
 
 def test_decision_enums_preserve_string_contract():
-    from model.order_flow import ConversationDecision, ReplanDecision
+    from model.refund.flow import ConversationDecision, ReplanDecision
     decision = ConversationDecision.model_validate({
         "intent": "order_question", "order_id": "DEMO-1001", "order_goal": "eligibility",
     })
@@ -27,7 +27,11 @@ def test_decision_enums_preserve_string_contract():
         "intent": "order_question", "order_id": "DEMO-1001", "order_goal": "eligibility",
     }
     assert ReplanDecision.model_validate({"action": "finish", "reason": "完成"}).action is ReplanAction.FINISH
-from model.status import OrderQueryStatus
+from model.orders.status import OrderQueryStatus
+
+
+def unexpected_policy_search(*_args):
+    pytest.fail("此测试不应触发政策检索")
 
 
 @pytest.mark.parametrize("plan", [
@@ -47,7 +51,7 @@ def test_graph_rejects_invalid_plan_before_dispatch(plan):
     def execute(_step, _trace_id):
         pytest.fail("invalid plans must not dispatch a tool")
 
-    graph = build_graph(decide, execute, lambda *_args, **_fields: None)
+    graph = build_graph(decide, execute, lambda *_args, **_fields: None, search=unexpected_policy_search)
     state = graph.invoke({"history": [{"role": "user", "content": "查一下 DEMO-1001"}],
                           "trace_id": "test"})
     assert state["reply"] == "本轮未能完成订单查询，请稍后再试。"
@@ -62,7 +66,8 @@ def test_typed_graph_continues_legacy_checkpoint_without_losing_partial_updates(
         return OrderToolEvent(event_id="order-event", trace_id=trace_id, model_tool_call_id="model-call",
                               order_id=step.order_id, result=OrderQueryResult(status=OrderQueryStatus.UNAVAILABLE))
 
-    graph = build_graph(decide, investigate, lambda *_a, **_kw: None, InMemorySaver())
+    graph = build_graph(decide, investigate, lambda *_a, **_kw: None, InMemorySaver(),
+                        search=unexpected_policy_search)
     config = {"configurable": {"thread_id": "old-conversation"}}
     previous = [{"role": "user", "content": "能退吗"}, {"role": "assistant", "content": "请提供订单号"}]
     graph.update_state(config, {"history": previous, "trace_id": "old-turn", "eligibility_question": "能退吗",

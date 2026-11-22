@@ -6,8 +6,8 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pymysql import OperationalError
-from model.order_query import GetOrderRequest, OrderQueryResult
-from model.status import OrderQueryStatus, PaymentStatus, RefundStatus, ShippingStatus
+from model.orders.query import GetOrderRequest, OrderQueryResult
+from model.orders.status import OrderQueryStatus, PaymentStatus, RefundStatus, ShippingStatus
 from mcp_service.orders.query import query_order
 
 

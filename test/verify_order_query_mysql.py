@@ -4,8 +4,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from model import create_pool
-from model.order_query import GetOrderRequest
-from model.status import OrderQueryStatus, RefundStatus
+from model.orders.query import GetOrderRequest
+from model.orders.status import OrderQueryStatus, RefundStatus
 from mcp_service.orders.query import query_order
 
 

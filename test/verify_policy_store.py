@@ -8,8 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mcp_service.policy import COLLECTION, parse_policy, normalize_vector
 from mcp_service.policy_backend import PolicyBackend
 from config import use_config
-from model.policy import PolicyEntry
-from model.status import PolicySearchMode
+from model.policy.search import PolicyEntry
+from model.policy.status import PolicySearchMode
 
 
 def main():
@@ -24,7 +24,8 @@ def main():
                             output_fields=['chunk_id','document_id','title','version','clause_id','entry_type','text','embedding'], limit=100, consistency_level='Strong')
         assert sum(row['entry_type'] == 'policy' for row in rows) == 14
         assert sum(row['entry_type'] == 'faq' for row in rows) == 7
-        entries = parse_policy(Path('order-demo/policy/refund-policy.md').read_text(encoding='utf-8'))
+        source = Path(__file__).resolve().parents[1] / 'policy' / 'refund-policy.md'
+        entries = parse_policy(source.read_text(encoding='utf-8'))
         expected = {entry.chunk_id: entry.model_dump() for entry in entries}
         assert all({k: row[k] for k in expected[row['chunk_id']]} == expected[row['chunk_id']] for row in rows)
         assert all(len(row['embedding']) == 1024 and all(math.isfinite(v) for v in row['embedding'])

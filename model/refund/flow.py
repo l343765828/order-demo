@@ -1,0 +1,185 @@
+"""查单流程使用的结构化数据模型。"""
+
+from enum import StrEnum
+from typing import Annotated, Literal
+
+from pydantic import BeforeValidator, Field, WithJsonSchema, model_validator
+
+from config.limits import RefundLimits
+from model.base import StrictModel
+from model.orders.query import OrderQueryResult
+from model.policy.search import PolicySearchResult
+from model.policy.evidence import PolicyEvidence
+from model.base import status_schema
+from model.refund.status import ConversationIntent, InvestigationKind, ObservationStatus, OrderGoal, ReplanAction
+
+
+# 定义退款业务流程使用的 LangGraph 节点标识。
+class OrderFlowNode(StrEnum):
+    INTENT = "intent"  # 识别本轮意图并初始化调查状态。
+    PLAN = "plan"  # 制定或核对本轮只读调查计划。
+    EXECUTE = "execute"  # 执行当前调查步骤并取得工具结果。
+    OBSERVE = "observe"  # 核对工具结果是否属于本轮和当前步骤。
+    REPLAN = "replan"  # 根据已核对的结果继续调查或生成回复。
+
+
+# 保存模型识别出的消费者意图及当前消息中的订单号。
+class ConversationDecision(StrictModel):
+    # 消费者本轮请求的意图，用于选择查单、政策咨询或澄清等路径。
+    intent: Annotated[ConversationIntent, BeforeValidator(ConversationIntent), status_schema(ConversationIntent, "Intent")]
+    # 从本轮消息中识别的订单号，消费者未提供时为 None。
+    order_id: str | None
+    # 查单的具体目标是了解订单状态或咨询退款资格，其他意图默认无查单目标。
+    order_goal: Annotated[
+        Annotated[OrderGoal, BeforeValidator(OrderGoal)] | None,
+        WithJsonSchema({"anyOf": [{"type": "string", "enum": [goal.value for goal in OrderGoal]},
+                                 {"type": "null"}], "title": "Order Goal"}),
+    ] = None
+
+
+# 描述一个查单步骤，包括订单、依赖关系和完成条件。
+class InvestigationStep(StrictModel):
+    # 本轮计划中的查单步骤标识。普通查单由模型生成，资格咨询由 Host 指定。
+    step_id: str = Field(min_length=1, max_length=RefundLimits.MAX_STEP_ID_CHARS)
+    # 固定为查单，表示读取当前消费者的订单事实。
+    kind: Annotated[Literal[InvestigationKind.INSPECT_ORDER], BeforeValidator(InvestigationKind)]
+    # 本步骤要查询的订单号，须与本轮意图中已核验的目标订单一致。
+    order_id: str
+    # 本步骤的前置步骤标识。当前查单可直接执行，填写空列表。
+    depends_on: list[str]
+    # 计划中对预期结果的说明，例如取得目标订单的支付、发货和模拟退款状态。
+    completion: str = Field(min_length=1, max_length=RefundLimits.MAX_DECISION_TEXT_CHARS)
+
+
+# 描述在可选查单依赖后执行的政策检索步骤。
+class PolicyStep(StrictModel):
+    # Host 在本轮计划中指定的政策步骤标识，用于关联执行记录和观察结果。
+    step_id: str = Field(min_length=1, max_length=RefundLimits.MAX_STEP_ID_CHARS)
+    # 固定为退款政策检索，校验时把输入值转换为该动作的枚举成员。
+    kind: Annotated[Literal[InvestigationKind.RETRIEVE_POLICY], BeforeValidator(InvestigationKind)]
+    # 用于检索退款政策的查询文本，可根据订单事实或补查需要替换。
+    query: str = Field(min_length=1, max_length=RefundLimits.MAX_POLICY_QUERY_CHARS)
+    # 检索前所依赖的步骤标识列表，空列表表示可直接检索。
+    depends_on: list[str]
+    # 描述步骤预期取得的结果。流程依据实际检索状态和证据决定后续处理。
+    completion: str = Field(min_length=1, max_length=RefundLimits.MAX_DECISION_TEXT_CHARS)
+
+
+# 保存本轮查单、政策检索或有序组合的调查计划。
+class InvestigationPlan(StrictModel):
+    # 按执行顺序列出的调查步骤。查询订单退款资格时先查单，再检索适用政策。
+    steps: list[InvestigationStep | PolicyStep] = Field(min_length=1, max_length=RefundLimits.MAX_INVESTIGATION_STEPS)
+
+
+# 关联追踪标识、模型工具调用和实际订单查询结果。
+class OrderToolEvent(StrictModel):
+    # Host 为本次 MCP 查单调用分配的工具事件编号，用于关联调用和观察记录。
+    event_id: str = Field(min_length=1)
+    # 归属的会话轮次追踪编号，供流程核对结果是否来自本轮。
+    trace_id: str
+    # 模型发出的工具调用编号，用于核对真实查单结果是否已回传给模型。
+    model_tool_call_id: str = Field(min_length=1)
+    # 本次工具实际查询的订单号，供流程与计划中的订单号核对。
+    order_id: str
+    # MCP 返回的查单结果，可表示查到本人订单、订单不可操作或查询失败。
+    result: OrderQueryResult
+
+
+# 关联 Host 请求、模型工具调用及 MCP 实际政策检索结果。
+class PolicyToolEvent(StrictModel):
+    # Host 为本次 MCP 政策查询调用分配的工具事件编号，用于关联调用和观察记录。
+    event_id: str = Field(min_length=1)
+    # 归属的会话轮次追踪编号，供流程核对候选是否来自本轮。
+    trace_id: str
+    # 模型发出的工具调用编号，用于核对真实政策结果是否已回传给模型。
+    model_tool_call_id: str = Field(min_length=1)
+    # 实际发送给政策检索工具的查询文本，供流程与执行时的查询核对。
+    query: str
+    # MCP 返回的政策检索结果，包含检索服务分配的事件编号和候选条款。
+    result: PolicySearchResult
+
+
+# 记录计划步骤的执行状态、工具事件和订单结果。
+class TaskObservation(StrictModel):
+    # 产生本次观察的调查步骤标识，可在本轮计划中定位。
+    step_id: str
+    # 根据工具结果判定的步骤状态，包括完成、缺少证据和失败。
+    status: Annotated[ObservationStatus, BeforeValidator(ObservationStatus), status_schema(ObservationStatus)]
+    # 产生本次观察的 MCP 工具事件编号，供回查实际结果。
+    tool_event_id: str
+    # 已核对的查单结果，仅查单观察携带此字段。
+    order_result: OrderQueryResult | None = None
+    # 已核对调用归属的政策检索结果，仅政策观察携带此字段。
+    policy_result: PolicySearchResult | None = None
+    # 政策候选经评估后形成的依据记录，尚未评估或属于查单观察时为 None。
+    policy_evidence: PolicyEvidence | None = None
+
+    # 每个观察必须对应一种工具结果，政策证据只能附在政策观察上。
+    @model_validator(mode="after")
+    def check_payload(self):
+        # region 观察须恰有一种工具结果，退款政策依据只可附于政策观察
+        if (self.order_result is None) == (self.policy_result is None):
+            raise ValueError("观察必须携带一种工具结果")
+        if self.policy_evidence is not None and self.policy_result is None:
+            raise ValueError("订单观察不能携带政策证据")
+        # endregion
+        return self
+
+
+# 表示调查结束后的完成或失败决定及其原因。
+class ReplanDecision(StrictModel):
+    # 调查后的处理动作，用于记录继续调查、结束本轮或报告失败。
+    action: Annotated[ReplanAction, BeforeValidator(ReplanAction), status_schema(ReplanAction, "Action")]
+    # 说明为何根据本次观察选择该动作，供过程记录和复盘使用。
+    reason: str = Field(min_length=1, max_length=RefundLimits.MAX_DECISION_TEXT_CHARS)
+
+
+# 描述会话原文中的消息角色和内容。
+class ExchangeMessage(StrictModel):
+    # 发言方，取 user 时是消费者，取 assistant 时是助手。
+    role: Literal["user", "assistant"]
+    # 发言方的消息原文，供会话回放和后续意图识别使用。
+    content: str
+
+
+# 描述传入图的一轮会话历史和请求追踪标识。
+class OrderTurn(StrictModel):
+    # 按消息序号排列的会话原文，最后一条是本轮待处理的消费者消息。
+    history: list[ExchangeMessage]
+    # 本轮请求唯一的追踪编号，用于串联图节点、工具调用和政策依据核对。
+    trace_id: str
+
+
+# 描述节点可以写入的字段。省略字段表示保留旧值，显式传入 None 表示清空。
+class OrderStateUpdate(StrictModel):
+    # 本轮识别出的消费者意图、订单号和查询目标。
+    decision: ConversationDecision | None = None
+    # 本轮查单和政策检索的调查步骤。
+    plan: InvestigationPlan | None = None
+    # 当前步骤产生的订单或政策工具调用事件。
+    event: OrderToolEvent | PolicyToolEvent | None = None
+    # 当前工具事件经过核验后的步骤观察。
+    observation: TaskObservation | None = None
+    # 纯查单分支保存的重规划决定。
+    replan_decision: ReplanDecision | None = None
+    # 本轮给消费者的回复；有值时结束图执行。
+    reply: str | None = None
+    # 当前执行的调查步骤在计划中的位置，从 0 开始。
+    step_index: int = 0
+    # 已核验的订单查询结果，供后续政策调查使用。
+    order_result: OrderQueryResult | None = None
+    # 缺少订单号时暂存的资格咨询问题，等待同会话补充。
+    eligibility_question: str | None = None
+    # 本轮要回答的问题；补充订单号时恢复为原资格问题。
+    question: str = ""
+    # 政策依据不足时用于正式条款补查的查询文本。
+    retry_query: str | None = None
+    # 政策补查前保留的检索结果，用于与补查结果一起核验证据。
+    policy_results: list[PolicySearchResult] = Field(default_factory=list)
+
+
+# 将本轮输入与已合并的调查状态提供给图节点，持久化时沿用字典和字符串枚举。
+class OrderState(OrderTurn, OrderStateUpdate):
+    pass
+
+
