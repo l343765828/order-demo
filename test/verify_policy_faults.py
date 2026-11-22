@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from model.policy.search import SearchPolicyRequest, PolicySearchResult
-from model.policy.status import PolicySearchStatus
+from model.policy.status import PolicySearchMode, PolicySearchStatus
 from config import DEFAULT_PATH
 from utils.mcp_client import bind_mcp_tool, open_mcp_client
 
@@ -45,10 +45,10 @@ class Proxy(BaseHTTPRequestHandler):
 async def verify(url):
     global mode
     async with open_mcp_client(url, token='x'*40, read_timeout_seconds=60) as client:
-        tool = await bind_mcp_tool(client, 'search_policy', SearchPolicyRequest, PolicySearchResult)
+        tool = await bind_mcp_tool(client, 'search_policy', PolicySearchResult)
         for mode in ('invalid_vector','rerank_failure','rerank_timeout'):
             before = counts.copy()
-            result = await tool.call({'query':'未发货能退款吗','mode':'formal'})
+            result = await tool.call(SearchPolicyRequest(query='未发货能退款吗', mode=PolicySearchMode.FORMAL))
             assert result.status is PolicySearchStatus.FAILED and not result.candidates
             delta = {k:counts[k]-before[k] for k in counts}
             assert delta == ({'embedding':1,'rerank':0} if mode == 'invalid_vector' else {'embedding':1,'rerank':1})

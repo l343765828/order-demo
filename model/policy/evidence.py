@@ -1,12 +1,11 @@
-"""咨询政策证据及其检索来源校验。"""
+"""咨询政策证据与引用的数据契约。"""
 from typing import Annotated
 
 from pydantic import BeforeValidator, Field, model_validator
 
 from model.base import StrictModel
-from model.policy.search import PolicySearchResult
 from model.base import status_schema
-from model.policy.status import PolicyEntryType, PolicyEvidenceStatus, PolicySearchStatus
+from model.policy.status import PolicyEvidenceStatus
 
 
 # 模型选择实际候选的序号，缺少依据时可建议一次正式条款补查。
@@ -50,22 +49,3 @@ class PolicyEvidence(StrictModel):
             raise ValueError('充分证据必须包含正式条款')
         # endregion
         return self
-
-
-# 仅核验引用来源和原文；语义相关性及订单事实由调用方另行核验。
-def verify_policy_evidence(evidence: PolicyEvidence, results: list[PolicySearchResult]) -> bool:
-    # region 仅在每条引用都匹配本轮成功检索中的当前版本正式条款和非空原文时通过
-    if evidence.status is not PolicyEvidenceStatus.SUFFICIENT:
-        return False
-    return all(citation.excerpt.strip() and any(
-        result.status is PolicySearchStatus.OK and result.event_id == citation.event_id
-        and any(candidate.document_id == citation.document_id == 'DEMO-REFUND-POLICY'
-                and candidate.title == '演示退款政策与常见问题'
-                and candidate.version == citation.version == '1.0'
-                and candidate.entry_type is PolicyEntryType.POLICY
-                and candidate.clause_id in {f'RF-{number:03d}' for number in range(1, 15)}
-                and candidate.clause_id == citation.clause_id
-                and citation.excerpt in candidate.text
-                for candidate in result.candidates)
-        for result in results) for citation in evidence.citations)
-    # endregion

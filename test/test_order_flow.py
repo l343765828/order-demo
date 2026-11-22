@@ -9,9 +9,9 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from order_agent import investigate_order
-from model.refund.flow import ExchangeMessage, InvestigationStep, OrderState, OrderToolEvent, OrderTurn
-from order_flow import build_graph
+from implementations.refund.investigation import investigate_order
+from model.refund.flow import ExchangeMessage, InvestigationStep, OrderToolEvent, OrderTurn
+from workflows.refund import build_graph, load_refund_state, run_refund_turn
 from model.orders.query import GetOrderRequest, OrderQueryResult
 from model.refund.status import ConversationIntent, OrderGoal, ReplanAction
 
@@ -68,19 +68,21 @@ def test_typed_graph_continues_legacy_checkpoint_without_losing_partial_updates(
 
     graph = build_graph(decide, investigate, lambda *_a, **_kw: None, InMemorySaver(),
                         search=unexpected_policy_search)
-    config = {"configurable": {"thread_id": "old-conversation"}}
+    session = "old-conversation"
+    config = {"configurable": {"thread_id": session}}
     previous = [{"role": "user", "content": "能退吗"}, {"role": "assistant", "content": "请提供订单号"}]
     graph.update_state(config, {"history": previous, "trace_id": "old-turn", "eligibility_question": "能退吗",
                                 "decision": {"intent": "order_question", "order_id": None, "order_goal": "eligibility"},
                                 "reply": "请提供订单号"}, as_node="intent")
-    snapshot = OrderState.model_validate(graph.get_state(config).values)
+    snapshot, _ = load_refund_state(graph, session)
+    assert snapshot is not None
     assert snapshot.history[0].content == "能退吗"
     assert snapshot.decision is not None and snapshot.decision.order_goal == "eligibility"
 
     turn = OrderTurn(history=[*snapshot.history, ExchangeMessage(role="user", content="DEMO-1001")],
                      trace_id="new-turn")
-    raw = graph.invoke(turn.model_dump(mode="json"), config)
-    result = OrderState.model_validate(raw)
+    result = run_refund_turn(graph, session, turn)
+    raw = graph.get_state(config).values
     assert result.question == "能退吗"
     assert result.eligibility_question is None and raw["eligibility_question"] is None
     assert result.decision is not None and result.decision.order_goal == "eligibility"

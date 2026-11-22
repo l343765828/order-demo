@@ -20,12 +20,13 @@ from mcp.client.streamable_http import streamable_http_client
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from conversations import create_conversation
+from implementations.refund.conversations import create_conversation
 from utils.mcp_client import controlled_mcp_http
 from model import connection_config, create_pool
 from config import load_config, use_config
-from order_flow import SERVICE_ERROR, UNAVAILABLE
-from order_runtime import CONSUMER_ID
+from implementations.orders.reply import SERVICE_ERROR, UNAVAILABLE
+from config.demo import CONSUMER_ID
+from launch_with_config import application_command
 
 
 def read_events(text):
@@ -76,8 +77,10 @@ def verify():
         json.dump(settings, config_file)
 
     def cli(*args, user_input=None, code=0):
-        result = subprocess.run([sys.executable, str(ROOT / "cli.py"), "--config", str(config_path), *args], env=env,
-                                input=user_input, capture_output=True, encoding="utf-8", timeout=180)
+        result = subprocess.run(
+            application_command("cli", config_path, *args), env=env,
+            input=user_input, capture_output=True, encoding="utf-8", timeout=180,
+        )
         events = read_events(result.stderr)
         assert result.returncode == code, (result.stdout, result.stderr)
         return result.stdout, events, result.stderr
@@ -97,8 +100,10 @@ def verify():
                 sessions.append(create_conversation(pool, CONSUMER_ID))
             sid, empty_sid = sessions
             with tempfile.TemporaryFile() as log:
-                with subprocess.Popen([sys.executable, "-m", "mcp_service.server", "--config", str(config_path)],
-                                      cwd=ROOT, env=env, stderr=log) as server:
+                with subprocess.Popen(
+                    application_command("mcp_service.server", config_path),
+                    cwd=ROOT, env=env, stderr=log,
+                ) as server:
                     try:
                         deadline = time.monotonic() + 15
                         while time.monotonic() < deadline:

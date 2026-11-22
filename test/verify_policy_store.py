@@ -5,8 +5,9 @@ import argparse
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mcp_service.policy import COLLECTION, parse_policy, normalize_vector
-from mcp_service.policy_backend import PolicyBackend
+from implementations.policy.source import parse_policy
+from mcp_service.policy.search import COLLECTION, normalize_vector
+from mcp_service.policy.backend import PolicyBackend
 from config import use_config
 from model.policy.search import PolicyEntry
 from model.policy.status import PolicySearchMode

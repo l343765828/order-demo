@@ -21,9 +21,10 @@ from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from config import use_config
+from config import DEFAULT_PATH, use_config
 from model import connection_config
-from policy_answer import NO_EVIDENCE, POLICY_UNAVAILABLE, published_clauses
+from implementations.policy.answer import NO_EVIDENCE, POLICY_UNAVAILABLE, published_clauses
+from launch_with_config import application_command
 from verify_order_cli import read_events
 import verify_policy_faults as faults
 
@@ -61,7 +62,7 @@ def server(settings, folder):
     path.write_text(json.dumps(settings), encoding="utf-8")
     env = {**os.environ, "PYTHONUTF8": "1"}
     with tempfile.TemporaryFile() as log, subprocess.Popen(
-        [sys.executable, "-m", "mcp_service.server", "--config", str(path)],
+        application_command("mcp_service.server", path),
         cwd=ROOT, env=env, stderr=log,
     ) as process:
         try:
@@ -82,7 +83,7 @@ def server(settings, folder):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--config", default=DEFAULT_PATH, type=Path)
     parser.add_argument("--evidence", type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--smoke", action="store_true")
@@ -106,7 +107,7 @@ def main():
         baseline = counts()
 
         def turn(path, message, expected, intent, session=None, tools=None):
-            command = [sys.executable, str(ROOT / "cli.py"), "--config", str(path)]
+            command = application_command("cli", path)
             if session:
                 command += ["--session", session]
             command += ["--message", message]

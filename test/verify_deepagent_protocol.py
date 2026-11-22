@@ -16,10 +16,10 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import SecretStr
 
-from protocol_probe_contracts import EchoResult
+from protocol_probe_contracts import EchoInput, EchoResult
 from verify_mcp_protocol import bind_echo, probe_process
 from utils.mcp_client import controlled_mcp_http
-from qwen_client import QwenChatOpenAI
+from utils.qwen_client import QwenChatOpenAI
 from config import load_config
 
 
@@ -54,7 +54,7 @@ async def run(url: str, log: Path) -> None:
             """Echo a value through the independent probe server."""
             call_id = runtime.tool_call_id
             assert call_id
-            data = await echo.call({"value": value, "trace_id": trace_id})
+            data = await echo.call(EchoInput(value=value, trace_id=trace_id))
             assert (data.value, data.trace_id) == (value, trace_id)
             assert data.server_pid != os.getpid()
             observations[call_id] = data

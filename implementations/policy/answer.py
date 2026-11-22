@@ -2,14 +2,14 @@
 
 import json
 from functools import lru_cache
-from pathlib import Path
 
 from interfaces.refund.decision import Decide
-from mcp_service.policy import TITLE, parse_policy, validate_policy_source
+from implementations.policy.evidence import verify_policy_evidence
+from implementations.policy.source import SOURCE_PATH, TITLE, parse_policy, validate_policy_source
 from config.limits import RefundLimits
 from model.orders.query import OrderDetails
 from model.policy.search import PolicyCandidate, PolicySearchResult
-from model.policy.evidence import PolicyCitation, PolicyEvidence, PolicySelection, verify_policy_evidence
+from model.policy.evidence import PolicyCitation, PolicyEvidence, PolicySelection
 from model.orders.status import PaymentStatus, RefundStatus, ShippingStatus
 from model.policy.status import PolicyEntryType, PolicyEvidenceStatus, PolicySearchStatus
 
@@ -20,8 +20,7 @@ NO_EVIDENCE = "当前政策文档未说明，暂无法给出有依据的回答�
 # 用发布源校验实际检索候选的身份和原文。
 @lru_cache(maxsize=1)
 def published_clauses() -> dict[str, PolicyCandidate]:
-    path = Path(__file__).with_name("policy") / "refund-policy.md"
-    source = path.read_text(encoding="utf-8")
+    source = SOURCE_PATH.read_text(encoding="utf-8")
     validate_policy_source(source)
     return {entry.clause_id: PolicyCandidate.model_validate(entry.model_dump(exclude={"chunk_id"}))
             for entry in parse_policy(source)}

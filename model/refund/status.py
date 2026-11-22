@@ -45,3 +45,9 @@ class ObservationStatus(StrEnum):
     COMPLETED = "completed"  # 步骤正常取得订单结果或政策检索结果。
     NO_EVIDENCE = "no_evidence"  # 步骤正常返回，但未找到可继续调查的本人订单。
     FAILED = "failed"  # 工具查询失败，无法取得本步骤的业务结果。
+
+
+# 管理命令显式选择初始化或装载退款演示数据。
+class DemoDataCommand(StrEnum):
+    INIT = "init"  # 创建缺失的库、应用表和外键。
+    SEED = "seed"  # 补齐演示订单和示例退款，保留现有业务记录。

@@ -3,7 +3,8 @@ import httpx
 from pymilvus import DataType, MilvusClient
 from config import load_config
 from config.limits import PolicyLimits
-from mcp_service.policy import COLLECTION, DOCUMENT_ID, VERSION, normalize_vector
+from implementations.policy.source import DOCUMENT_ID, VERSION
+from mcp_service.policy.search import COLLECTION, normalize_vector
 from model.policy.search import PolicyEntry, PolicyVectorRecord
 from model.policy.status import PolicyEntryType, PolicySearchMode
 

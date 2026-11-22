@@ -27,6 +27,7 @@ def make_app(log: Path, schema_fault: str):
         tool.input_schema["additionalProperties"] = True
     if schema_fault == "output":
         assert tool.output_schema is not None
+        tool.output_schema["properties"]["server_pid"].pop("exclusiveMinimum")
         tool.output_schema["properties"]["server_pid"]["minimum"] = 0
 
     def record(method: str, **data) -> None:
@@ -49,6 +50,8 @@ def make_app(log: Path, schema_fault: str):
         ).model_dump()
         if args.value == "bad-result":
             observation["server_pid"] = "not a process ID"
+        if args.value == "zero-pid":
+            observation["server_pid"] = 0
         return types.CallToolResult(content=[], structured_content=observation)
 
     server = Server(

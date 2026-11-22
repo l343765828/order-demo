@@ -4,7 +4,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import SecretStr
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from qwen_client import QwenChatOpenAI
+from utils.qwen_client import QwenChatOpenAI
 
 def test_agent_name_is_removed_and_unsupported_choices_fail():
     model = QwenChatOpenAI(model="Qwen/Qwen3-8B", api_key=SecretStr("test"))

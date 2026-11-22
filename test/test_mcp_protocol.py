@@ -9,9 +9,17 @@ from mcp import Client, types
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from pydantic import ValidationError
+from starlette.testclient import TestClient
 
-from protocol_probe_contracts import EchoResult
+from protocol_probe_contracts import EchoInput, EchoResult
 from verify_mcp_protocol import bind_echo, probe_process
+from config.demo import CONSUMER_ID
+from mcp_service import server
+from mcp_service.policy import backend
+from model.orders.query import GetOrderRequest, OrderQueryResult
+from model.orders.status import OrderQueryStatus
+from model.policy.search import PolicySearchResult
+from model.policy.status import PolicySearchMode, PolicySearchStatus
 from utils.mcp_client import controlled_mcp_http
 
 
@@ -52,9 +60,9 @@ async def check_fault(fault, expected, resends, tmp_path):
                 async with client:
                     tool = await bind_echo(client)
                     assert client.protocol_version == "2026-07-28"
-                    args = {"value": fault, "trace_id": trace}
+                    args = EchoInput(value=fault, trace_id=trace)
                     if high_level:
-                        result = await client.call_tool("probe_echo", args)
+                        result = await client.call_tool("probe_echo", args.model_dump(mode="json"))
                         assert EchoResult.model_validate(result.structured_content).trace_id == trace
                     elif isinstance(expected, type):
                         with pytest.raises(expected, match="input|output|structured|schema"):
@@ -97,25 +105,87 @@ async def check_fault(fault, expected, resends, tmp_path):
             )
 
 
-def test_incompatible_discovery_and_invalid_arguments(tmp_path):
-    asyncio.run(check_schema(tmp_path))
+def test_discovery_allows_schema_variations(tmp_path):
+    asyncio.run(check_discovery(tmp_path))
 
 
-async def check_schema(tmp_path):
+async def check_discovery(tmp_path):
     log = tmp_path / "schema.jsonl"
     for schema_fault in ("input", "output"):
         with probe_process(log, schema_fault=schema_fault) as (url, _):
             async with Client(streamable_http_client(url)) as client:
-                with pytest.raises(ValueError, match=f"{schema_fault} schema"):
-                    await bind_echo(client)
-    with probe_process(log) as (url, _):
-        async with Client(streamable_http_client(url)) as client:
-            tool = await bind_echo(client)
-            for args in (
-                {"value": 1, "trace_id": "trace"},
-                {"value": "blue", "trace_id": "trace", "extra": True},
-                {"value": "blue"},
-            ):
-                with pytest.raises(ValidationError):
-                    await tool.call(args)
-    assert '"method": "tools/call"' not in log.read_text(encoding="utf-8")
+                tool = await bind_echo(client)
+                assert (await tool.call(EchoInput(value="blue", trace_id="trace"))).value == "blue"
+                if schema_fault == "output":
+                    with pytest.raises(ValidationError, match="server_pid"):
+                        await tool.call(EchoInput(value="zero-pid", trace_id="trace"))
+
+
+def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
+    calls = []
+    trace = str(uuid.uuid4())
+    policy_event = str(uuid.uuid4())
+
+    def query_order(pool, request, consumer):
+        calls.append((request, consumer))
+        return OrderQueryResult(status=OrderQueryStatus.UNAVAILABLE)
+
+    class Backend:
+        def close(self):
+            calls.append("closed")
+
+    policy_backend = Backend()
+
+    def search_policy(query, mode, connection):
+        assert connection is policy_backend
+        calls.append((query, mode))
+        return PolicySearchResult(status=PolicySearchStatus.OK, event_id=policy_event, candidates=[])
+
+    monkeypatch.setattr(server, "query_order", query_order)
+    monkeypatch.setattr(server.search, "search_policy", search_policy)
+    monkeypatch.setattr(backend, "PolicyBackend", lambda: policy_backend)
+    headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25"}
+
+    with TestClient(server.make_app(None, "test-token"), base_url="http://127.0.0.1:8000", headers=headers) as http:
+        assert http.post("/mcp", json={}).status_code == 401
+        http.headers["Authorization"] = "Bearer test-token"
+
+        def request(method, params, request_id=1):
+            response = http.post("/mcp", json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+            response.raise_for_status()
+            return response.json()["result"]
+
+        request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                               "clientInfo": {"name": "test", "version": "1"}})
+        tools = {tool["name"]: tool for tool in request("tools/list", {})["tools"]}
+        assert set(tools) == {"get_order", "search_policy"}
+        assert set(tools["get_order"]["inputSchema"]["properties"]) == {"order_id"}
+        assert set(tools["search_policy"]["inputSchema"]["properties"]) == {"query", "mode"}
+        assert all(tool["annotations"]["readOnlyHint"] and not tool["inputSchema"]["additionalProperties"]
+                   for tool in tools.values())
+
+        for name, arguments in (
+            ("get_order", {"order_id": "DEMO-1001", "consumer_id": "DEMO-USER-02"}),
+            ("get_order", {"order_id": 1001}),
+            ("get_order", {}),
+            ("search_policy", {"query": "refund", "mode": "invalid"}),
+            ("search_policy", {"query": "refund", "mode": "formal", "extra": True}),
+            ("unknown", {}),
+        ):
+            assert request("tools/call", {"name": name, "arguments": arguments}) == {"isError": True, "content": []}
+        assert calls == []
+
+        order = request("tools/call", {"name": "get_order", "arguments": {"order_id": "DEMO-1001"},
+                                       "_meta": {"trace_id": trace}}, request_id=2)
+        policy = request("tools/call", {"name": "search_policy", "arguments": {"query": "refund", "mode": "formal"}},
+                         request_id=3)
+        assert OrderQueryResult.model_validate(order["structuredContent"]).status is OrderQueryStatus.UNAVAILABLE
+        assert PolicySearchResult.model_validate(policy["structuredContent"]).event_id == policy_event
+
+    assert calls == [(GetOrderRequest(order_id="DEMO-1001"), CONSUMER_ID), ("refund", PolicySearchMode.FORMAL), "closed"]
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")]
+    assert [event["reason"] for event in events if event["event"] == "mcp_tool_rejected"] == [
+        "bad_arguments", "bad_arguments", "bad_arguments", "unknown_tool",
+    ]
+    order_event, = [event for event in events if event["event"] == "mcp_get_order"]
+    assert order_event["trace_id"] == trace and order_event["mcp_request_id"] == 2

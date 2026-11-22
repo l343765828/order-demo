@@ -9,7 +9,7 @@ from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from qwen_client import QwenChatOpenAI
+from utils.qwen_client import QwenChatOpenAI
 from config import load_config
 
 class ProbeResult(BaseModel):

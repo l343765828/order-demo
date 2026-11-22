@@ -11,10 +11,10 @@ from pathlib import Path
 import httpx2
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from model.policy.search import SearchPolicyRequest, PolicySearchResult
-from model.policy.status import PolicySearchStatus
+from model.policy.status import PolicySearchMode, PolicySearchStatus
 from config import DEFAULT_PATH
 from utils.mcp_client import bind_mcp_tool, open_mcp_client
-from utils.policy_tool import make_policy_tool
+from implementations.policy.tool import make_policy_tool
 
 
 async def verify(url, token, expect_failure):
@@ -22,9 +22,9 @@ async def verify(url, token, expect_failure):
         response = await http.post(url, json={})
         assert response.status_code == 401
     async with open_mcp_client(url, token=token, read_timeout_seconds=90) as client:
-        tool = await bind_mcp_tool(client, 'search_policy', SearchPolicyRequest, PolicySearchResult)
+        tool = await bind_mcp_tool(client, 'search_policy', PolicySearchResult)
         if expect_failure:
-            result = await tool.call({'query':'退款', 'mode':'formal'}, timeout=60)
+            result = await tool.call(SearchPolicyRequest(query='退款', mode=PolicySearchMode.FORMAL), timeout=60)
             assert result.status is PolicySearchStatus.FAILED and not result.candidates
             print('milvus unavailable: failed, empty candidates, event=', result.event_id)
             return

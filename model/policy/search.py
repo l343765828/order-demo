@@ -9,6 +9,11 @@ from model.base import status_schema
 from model.policy.status import PolicyEntryType, PolicySearchMode, PolicySearchStatus
 
 
+# 检索文本及由 Host 指定的范围，供工具签名和请求模型使用。
+PolicyQueryText = Annotated[str, Field(strict=True, min_length=1, max_length=RefundLimits.MAX_POLICY_QUERY_CHARS)]
+PolicySearchScope = Annotated[PolicySearchMode, BeforeValidator(PolicySearchMode), status_schema(PolicySearchMode, 'Mode')]
+
+
 # 由文档、版本和条目编号生成稳定的政策条目主键。
 def policy_chunk_id(document_id: str, version: str, clause_id: str) -> str:
     return hashlib.sha256(f'{document_id}:{version}:{clause_id}'.encode('utf-8')).hexdigest()
@@ -18,16 +23,16 @@ def policy_chunk_id(document_id: str, version: str, clause_id: str) -> str:
 class PolicyQuery(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     # 子 Agent 提交的政策查询文本，转发前由 Host 与本步骤的查询核对。
-    query: str = Field(min_length=1, max_length=RefundLimits.MAX_POLICY_QUERY_CHARS)
+    query: PolicyQueryText
 
 
 # 限制调用方只能提出查询与由 Host 控制的检索范围。
 class SearchPolicyRequest(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     # MCP 用于召回和重排政策候选的查询文本。
-    query: str = Field(min_length=1, max_length=RefundLimits.MAX_POLICY_QUERY_CHARS)
+    query: PolicyQueryText
     # Host 指定的检索范围，可允许常见问题或只召回正式条款。
-    mode: Annotated[PolicySearchMode, BeforeValidator(PolicySearchMode), status_schema(PolicySearchMode, 'Mode')]
+    mode: PolicySearchScope
 
 
 # 返回单条重排候选的政策来源和原文。

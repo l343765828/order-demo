@@ -5,7 +5,16 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config import load_config
+from config import DEFAULT_PATH, load_config
+
+
+@pytest.fixture
+def local_settings():
+    data = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
+    data["mysql"]["password"] = "test-password"
+    data["mcp"]["read_token"] = "x" * 32
+    data["qwen"]["api_key"] = "test-key"
+    return data
 
 
 def test_load_config_from_json(tmp_path):
@@ -45,25 +54,21 @@ def test_policy_settings_are_loaded_from_json(tmp_path, monkeypatch):
     assert config.policy.model_base == "http://model:8000"
 
 
-def test_policy_settings_must_be_complete_without_exposing_credentials(tmp_path):
-    data = json.loads((Path(__file__).resolve().parents[1] / "config/example.json").read_text(encoding="utf-8"))
-    data["mcp"]["read_token"] = "x" * 32
-    data["policy"] = {"milvus_uri": "http://db:19530", "milvus_token": "private", "model_base": ""}
+def test_policy_settings_must_be_complete_without_exposing_credentials(tmp_path, local_settings):
+    local_settings["policy"] = {"milvus_uri": "http://db:19530", "milvus_token": "private", "model_base": ""}
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
+    path.write_text(json.dumps(local_settings), encoding="utf-8")
     with pytest.raises(ValueError) as error:
         load_config(path)
     assert "private" not in str(error.value)
 
 
-def test_policy_backend_uses_selected_configuration(tmp_path, monkeypatch):
-    import mcp_service.policy_backend as backend
+def test_policy_backend_uses_selected_configuration(tmp_path, monkeypatch, local_settings):
+    import mcp_service.policy.backend as backend
     from config import use_config
-    data = json.loads((Path(__file__).resolve().parents[1] / "config/example.json").read_text(encoding="utf-8"))
-    data["mcp"]["read_token"] = "x" * 32
-    data["policy"] = {"milvus_uri": "http://configured:19530", "milvus_token": "private", "model_base": "http://configured:8000/"}
+    local_settings["policy"] = {"milvus_uri": "http://configured:19530", "milvus_token": "private", "model_base": "http://configured:8000/"}
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
+    path.write_text(json.dumps(local_settings), encoding="utf-8")
     calls = []
     monkeypatch.setattr(backend, "MilvusClient", lambda **kwargs: calls.append(kwargs))
     monkeypatch.setenv("POLICY_MILVUS_URI", "http://wrong:1")
@@ -78,14 +83,12 @@ def test_policy_backend_uses_selected_configuration(tmp_path, monkeypatch):
         use_config(None)
 
 
-def test_policy_backend_requires_policy_section(tmp_path):
+def test_policy_backend_requires_policy_section(tmp_path, local_settings):
     from config import use_config
-    from mcp_service.policy_backend import PolicyBackend
-    data = json.loads((Path(__file__).resolve().parents[1] / "config/example.json").read_text(encoding="utf-8"))
-    data["mcp"]["read_token"] = "x" * 32
-    del data["policy"]
+    from mcp_service.policy.backend import PolicyBackend
+    local_settings.pop("policy", None)
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
+    path.write_text(json.dumps(local_settings), encoding="utf-8")
     use_config(path)
     try:
         assert load_config().policy is None

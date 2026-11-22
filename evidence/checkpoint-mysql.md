@@ -1,6 +1,6 @@
 # MySQL checkpoint 验收记录
 
-2026-11-20 配置调整：当前 MySQL 连接信息使用 `order-demo/config/local.json`，格式见 `order-demo/config/example.json`。以下为 02 当时的历史验收记录。
+2026-11-20 配置调整：当前 MySQL 连接信息在 `config/local.json` 中配置。以下为 02 当时的历史验收记录。
 
 2026-11-19；目标实例 `SELECT VERSION()`：8.0.46。`langgraph-checkpoint-mysql` 上游要求 MySQL >= 8.0.19；历史 8.0.17 和 1064 错误见工单原记录。
 

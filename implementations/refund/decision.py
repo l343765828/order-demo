@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 from interfaces.refund.decision import Decide, Decision
 from model.policy.evidence import PolicySelection
-from qwen_client import QwenChatOpenAI
+from utils.qwen_client import QwenChatOpenAI
 
 
 # 为退款业务流程调用 Qwen，校验模型决定并记录政策依据的选择结果。

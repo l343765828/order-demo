@@ -1,6 +1,6 @@
 # 03 协议兼容性验收记录
 
-2026-11-20 配置调整：当前 Qwen 连接信息使用 `order-demo/config/local.json`，格式见 `order-demo/config/example.json`。以下为 03 当时的历史验收记录。
+2026-11-20 配置调整：当前 Qwen 连接信息在 `config/local.json` 中配置。以下为 03 当时的历史验收记录。
 
 最新验收见下文「完整复测」。前两轮记录保留用于追溯。
 

@@ -9,10 +9,14 @@ from model.base import status_schema
 from model.orders.status import OrderQueryStatus, PaymentStatus, RefundStatus, ShippingStatus
 
 
+# 查单允许的订单号类型和字符数范围，由工具签名和请求模型共用。
+OrderQueryId = Annotated[str, Field(strict=True, min_length=1, max_length=RefundLimits.MAX_ORDER_ID_CHARS)]
+
+
 # 定义查单工具可接收的订单编号，不包含消费者身份。
 class GetOrderRequest(StrictModel):
     # 消费者要查询的订单号，服务端会结合认证身份核对订单归属。
-    order_id: str = Field(min_length=1, max_length=RefundLimits.MAX_ORDER_ID_CHARS)
+    order_id: OrderQueryId
 
 
 # 描述本人订单的支付、发货、退款状态及实付金额。

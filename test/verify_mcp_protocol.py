@@ -61,7 +61,7 @@ def probe_process(log: Path, *, schema_fault: str = "") -> Iterator[tuple[str, i
 
 
 def bind_echo(client: Client):
-    return bind_mcp_tool(client, "probe_echo", EchoInput, EchoResult)
+    return bind_mcp_tool(client, "probe_echo", EchoResult)
 
 
 async def run(url: str, launcher_pid: int) -> None:
@@ -70,7 +70,7 @@ async def run(url: str, launcher_pid: int) -> None:
         streamable_http_client(url, http_client=http), read_timeout_seconds=10,
     ) as client:
         tool = await bind_echo(client)
-        data = await tool.call({"value": "blue", "trace_id": trace})
+        data = await tool.call(EchoInput(value="blue", trace_id=trace))
         assert (data.value, data.trace_id) == ("blue", trace) and data.server_pid != os.getpid()
         print(
             f"host_pid={os.getpid()} server_pid={data.server_pid} launcher_pid={launcher_pid} "

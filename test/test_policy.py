@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mcp_service.policy import parse_policy, normalize_vector
+from implementations.policy.source import parse_policy, validate_policy_source
+from mcp_service.policy.search import normalize_vector
 from model.policy.status import PolicySearchMode, PolicySearchStatus
 
 POLICY_SOURCE = Path(__file__).resolve().parents[1] / 'policy' / 'refund-policy.md'
@@ -49,7 +50,7 @@ class PolicyTests(unittest.TestCase):
 
 class SearchTests(unittest.TestCase):
     def test_search_failure_never_returns_unranked_candidates(self):
-        from mcp_service.policy import search_policy
+        from mcp_service.policy.search import search_policy
         class FailedBackend:
             def embed(self, text): return [1.0] + [0.0] * 1023
             def recall(self, vector, mode): return [{'text': 'candidate'}]
@@ -59,7 +60,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result.candidates, [])
 
     def test_milvus_recall_returns_typed_entries_without_vectors(self):
-        from mcp_service.policy_backend import PolicyBackend
+        from mcp_service.policy.backend import PolicyBackend
         from model.policy.search import PolicyEntry
 
         row = {'chunk_id': parse_policy('## RF-001 — 标题\n\n正文')[0].chunk_id, 'document_id':'DEMO-REFUND-POLICY', 'title':'政策',
@@ -74,7 +75,7 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(entry.clause_id, 'RF-001')
 
     def test_publish_writes_complete_record(self):
-        from mcp_service.policy_backend import PolicyBackend
+        from mcp_service.policy.backend import PolicyBackend
 
         class Client:
             def upsert(self, collection, rows, **kwargs): self.rows = rows
@@ -106,14 +107,14 @@ class ResultTests(unittest.TestCase):
             with self.assertRaises(ValidationError): PolicySearchResult.model_validate(value)
 
     def test_rejects_source_header_mismatch(self):
-        from mcp_service.policy import validate_policy_source
         source = POLICY_SOURCE.read_text(encoding='utf-8')
         with self.assertRaises(ValueError): validate_policy_source(source.replace('版本：1.0', '版本：2.0'))
 
 class HostScopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_tool_cannot_override_formal_scope(self):
-        from utils.policy_tool import make_policy_tool
-        from model.policy.search import PolicySearchResult
+        from implementations.policy.tool import make_policy_tool
+        from model.policy.search import SearchPolicyRequest, PolicySearchResult
+        from model.policy.status import PolicySearchMode
         seen = []
         class Bound:
             async def call(self, args, **kwargs):
@@ -123,6 +124,6 @@ class HostScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('mode', tool.args)
         result = await tool.ainvoke({'query':'退款'})
         self.assertEqual(result['status'], 'ok')
-        self.assertEqual(seen[0]['mode'], 'formal')
+        self.assertEqual(seen, [SearchPolicyRequest(query='退款', mode=PolicySearchMode.FORMAL)])
         with self.assertRaises(Exception):
             await tool.ainvoke({'query':'退款', 'mode':'consultation'})

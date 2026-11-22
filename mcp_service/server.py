@@ -1,28 +1,31 @@
 """独立 Streamable HTTP 只读订单服务。"""
 
 import argparse
+from enum import StrEnum
 from hmac import compare_digest
-from uuid import UUID
+from typing import Annotated, Any
+from uuid import UUID, uuid4
 
 import uvicorn
 from mcp import types
 from mcp.server.context import ServerRequestContext
-from mcp.server.lowlevel import Server
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from pydantic import ValidationError
-from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
-from model import create_pool
-from config import load_config, use_config
+from config import load_config
+from config.demo import CONSUMER_ID
 from mcp_service.orders.query import query_order
-from model.orders.query import GetOrderRequest, OrderQueryResult
-from model.policy.search import SearchPolicyRequest, PolicySearchResult
+from mcp_service.policy import search
+from model import create_pool
+from model.orders.query import GetOrderRequest, OrderQueryId, OrderQueryResult
+from model.policy.search import PolicyQueryText, PolicySearchResult, PolicySearchScope
 from model.policy.status import PolicySearchStatus
 from model.refund.tool_name import McpToolName
-from mcp_service.policy import search_policy
-from order_runtime import CONSUMER_ID, log_event, read_token
+from utils.events import log_event
 
 
 # 将有效的事件标识规范为 UUID 字符串，无效时返回空值。
@@ -33,86 +36,113 @@ def _event_uuid(value: object) -> str | None:
         return None
 
 
-# 创建仅开放只读订单查询并校验访问凭据的 MCP 应用。
-def make_app(pool, token: str):
-    tool = types.Tool(
-        name=McpToolName.GET_ORDER.value, description="读取当前消费者本人的一笔演示订单。",
-        input_schema=GetOrderRequest.model_json_schema(),
-        output_schema=OrderQueryResult.model_json_schema(),
-        annotations=types.ToolAnnotations(read_only_hint=True),
-    )
-    expected = f"Bearer {token}".encode("ascii")
-    policy_tool = types.Tool(
-        name=McpToolName.SEARCH_POLICY.value, description="检索当前版本退款政策候选；范围由调用方控制。",
-        input_schema=SearchPolicyRequest.model_json_schema(),
-        output_schema=PolicySearchResult.model_json_schema(),
-        annotations=types.ToolAnnotations(read_only_hint=True),
+# 定义 MCP 服务对外记录的认证、拒绝及工具结果事件。
+class _McpEvent(StrEnum):
+    AUTH_REJECTED = "mcp_auth_rejected"  # HTTP 凭据缺失或无效。
+    TOOL_REJECTED = "mcp_tool_rejected"  # 工具未注册或查单参数无效。
+    GET_ORDER = "mcp_get_order"  # 查询本人订单后记录业务结果。
+    SEARCH_POLICY = "mcp_search_policy"  # 政策检索结束后记录状态及检索事件标识。
+
+
+# 区分工具拒绝事件的协议原因。
+class _RejectionReason(StrEnum):
+    UNKNOWN_TOOL = "unknown_tool"  # 调用目标未在服务上注册。
+    BAD_ARGUMENTS = "bad_arguments"  # 查单参数字段、类型或取值不符合契约。
+
+
+# 将工具日志与客户端追踪标识和 SDK 请求标识关联。
+def _log_tool_event(event: _McpEvent, ctx: ServerRequestContext, **fields) -> None:
+    meta = ctx.meta or {}
+    log_event(
+        event.value, trace_id=_event_uuid(meta.get("trace_id")),
+        tool_event_id=_event_uuid(meta.get("tool_event_id")), mcp_request_id=ctx.request_id, **fields,
     )
 
-    # 返回本服务允许客户端发现的查单工具定义。
-    async def list_tools(_ctx, _params) -> types.ListToolsResult:
-        return types.ListToolsResult(tools=[tool, policy_tool])
 
-    # 校验认证上下文和工具参数，查询本人订单并记录结果事件。
-    async def get_order(ctx: ServerRequestContext, params: types.CallToolRequestParams):
-        # region 认证上下文匹配已配置消费者后才接收工具调用并关联请求事件
-        consumer = getattr(getattr(ctx.request, "state", None), "consumer_id", None)
-        if consumer != CONSUMER_ID:
+# 统一执行演示消费者鉴权及额外参数检查，工具分发交给 SDK。
+class _OrderMcpServer(MCPServer):
+    # 声明已注册工具只接受签名中定义的参数字段。
+    async def list_tools(self) -> list[types.Tool]:
+        tools = await super().list_tools()
+        for tool in tools:
+            tool.input_schema["additionalProperties"] = False
+        return tools
+
+    # 校验访问身份及参数字段，保留拒绝结果和查单审计事件。
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context | None = None,
+    ) -> types.CallToolResult | types.InputRequiredResult:
+        # region 仅执行 HTTP 已认证消费者发起的工具调用
+        ctx = context.request_context if context is not None else None
+        if ctx is None or getattr(getattr(ctx.request, "state", None), "consumer_id", None) != CONSUMER_ID:
             return types.CallToolResult(content=[], is_error=True)
-        meta = ctx.meta or {}
-        event = dict(
-            trace_id=_event_uuid(meta.get("trace_id")),
-            tool_event_id=_event_uuid(meta.get("tool_event_id")),
-            mcp_request_id=ctx.request_id,
-        )
         # endregion
 
-        match params.name:
-            # region 政策请求校验检索参数，后端异常时返回失败状态
-            case policy_tool.name:
-                try:
-                    policy_request = SearchPolicyRequest.model_validate(params.arguments)
-                except ValidationError:
-                    return types.CallToolResult(content=[], is_error=True)
+        # region 目标工具未注册时记录拒绝事件
+        tool = next((tool for tool in await self.list_tools() if tool.name == name), None)
+        if tool is None:
+            _log_tool_event(_McpEvent.TOOL_REJECTED, ctx, reason=_RejectionReason.UNKNOWN_TOOL.value)
+            return types.CallToolResult(content=[], is_error=True)
+        # endregion
 
-                # 每次请求独立关闭后端连接，连接或检索失败均返回失败状态。
-                def find_policy():
-                    from mcp_service.policy_backend import PolicyBackend
-                    from uuid import uuid4
-                    try:
-                        backend = PolicyBackend()
-                        try:
-                            return search_policy(policy_request.query, policy_request.mode, backend)
-                        finally:
-                            backend.close()
-                    except Exception:
-                        return PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=str(uuid4()), candidates=[])
+        # region 参数没有多余字段时交由 SDK 校验取值并调用工具
+        if arguments.keys() <= tool.input_schema["properties"].keys():
+            try:
+                return await super().call_tool(name, arguments, context)
+            except ToolError as exc:
+                if isinstance(exc, UnexpectedToolError) or not isinstance(exc.__cause__, ValidationError):
+                    raise
+        # endregion
 
-                result = await run_in_threadpool(find_policy)
-                log_event("mcp_search_policy", status=result.status.value, policy_event_id=result.event_id, **event)
-                return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
-            # endregion
+        # region 参数无效时拒绝执行，查单请求额外记录拒绝原因
+        if name == McpToolName.GET_ORDER.value:
+            _log_tool_event(_McpEvent.TOOL_REJECTED, ctx, reason=_RejectionReason.BAD_ARGUMENTS.value)
+        return types.CallToolResult(content=[], is_error=True)
+        # endregion
 
-            # region 查单参数校验通过后，按认证身份读取订单
-            case tool.name:
-                try:
-                    request = GetOrderRequest.model_validate(params.arguments)
-                except ValidationError:
-                    log_event("mcp_tool_rejected", reason="bad_arguments", **event)
-                    return types.CallToolResult(content=[], is_error=True)
-                result = await run_in_threadpool(query_order, pool, request, consumer)
-                log_event("mcp_get_order", status=result.status.value, **event)
-                return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
-            # endregion
 
-            # region 工具名称不在白名单时拒绝调用
-            case _:
-                log_event("mcp_tool_rejected", reason="unknown_tool", **event)
-                return types.CallToolResult(content=[], is_error=True)
-            # endregion
+# 创建提供查单和政策检索的只读 MCP 应用，并绑定 HTTP 访问凭据。
+def make_app(pool, token: str):
+    server = _OrderMcpServer("order-demo")
+    read_only = types.ToolAnnotations(read_only_hint=True)
 
-    server = Server("order-demo", on_list_tools=list_tools, on_call_tool=get_order)
+    # 根据已认证的演示消费者身份查单，返回结构化结果供 Agent 使用。
+    @server.tool(name=McpToolName.GET_ORDER.value, description="读取当前消费者本人的一笔演示订单。",
+                 annotations=read_only)
+    def get_order(order_id: OrderQueryId, ctx: Context) -> Annotated[types.CallToolResult, OrderQueryResult]:
+        # region 按认证身份读取订单并记录查询结果
+        result = query_order(pool, GetOrderRequest(order_id=order_id), CONSUMER_ID)
+        _log_tool_event(_McpEvent.GET_ORDER, ctx.request_context, status=result.status.value)
+        return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
+        # endregion
+
+    # 按 Host 指定的范围检索政策候选，并记录关联的检索事件。
+    @server.tool(name=McpToolName.SEARCH_POLICY.value, description="检索当前版本退款政策候选；范围由调用方控制。",
+                 annotations=read_only)
+    def search_policy(
+        query: PolicyQueryText, mode: PolicySearchScope, ctx: Context,
+    ) -> Annotated[types.CallToolResult, PolicySearchResult]:
+        from mcp_service.policy.backend import PolicyBackend
+
+        # region 每次检索独立关闭后端连接，后端异常时返回失败状态及空候选
+        try:
+            backend = PolicyBackend()
+            try:
+                result = search.search_policy(query, mode, backend)
+            finally:
+                backend.close()
+        except Exception:
+            result = PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=str(uuid4()), candidates=[])
+        # endregion
+
+        # region 记录检索状态和事件编号，并返回结构化候选
+        _log_tool_event(_McpEvent.SEARCH_POLICY, ctx.request_context,
+                        status=result.status.value, policy_event_id=result.event_id)
+        return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
+        # endregion
+
     mcp = server.streamable_http_app(json_response=True, stateless_http=True)
+    expected = f"Bearer {token}".encode("ascii")
 
     # 校验 HTTP 访问凭据，在请求上下文中绑定固定演示消费者。
     async def authenticated(scope: Scope, receive: Receive, send: Send) -> None:
@@ -120,7 +150,7 @@ def make_app(pool, token: str):
         if scope["type"] == "http":
             headers = Headers(scope=scope).getlist("authorization")
             if len(headers) != 1 or not compare_digest(headers[0].encode("latin-1"), expected):
-                log_event("mcp_auth_rejected")
+                log_event(_McpEvent.AUTH_REJECTED.value)
                 await Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
                 return
             scope.setdefault("state", {})["consumer_id"] = CONSUMER_ID
@@ -132,13 +162,11 @@ def make_app(pool, token: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="订单 MCP 服务")
-    parser.add_argument("--config", help="JSON 配置文件路径")
-    args = parser.parse_args()
-    use_config(args.config)
-    token = read_token()
+    parser.parse_args()
+    mcp_config = load_config().mcp
     pool = create_pool()
     try:
-        uvicorn.run(make_app(pool, token), host=load_config().mcp.host,
-                    port=load_config().mcp.port, access_log=False, log_level="warning")
+        uvicorn.run(make_app(pool, mcp_config.read_token), host=mcp_config.host,
+                    port=mcp_config.port, access_log=False, log_level="warning")
     finally:
         pool.close()

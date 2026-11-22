@@ -16,7 +16,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from mcp.types import RequestParamsMeta
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from config import load_config
 from config.limits import ConnectionLimits
@@ -26,26 +26,9 @@ from model.policy.search import PolicyQuery, PolicySearchResult, SearchPolicyReq
 from model.orders.query import GetOrderRequest, OrderQueryResult
 from model.policy.status import PolicySearchMode
 from model.refund.tool_name import McpToolName
-from qwen_client import QwenChatOpenAI
+from utils.qwen_client import create_qwen_client
 
 FetchOrder = Callable[[GetOrderRequest, str], Awaitable[OrderQueryResult]]
-
-
-# 使用配置创建 Qwen 聊天模型客户端，并接入指定的网络传输。
-def qwen(**transport) -> QwenChatOpenAI:
-    config = load_config().qwen
-    return QwenChatOpenAI(
-        model=config.model,
-        base_url=config.base_url,
-        api_key=SecretStr(config.api_key),
-        temperature=0,
-        max_completion_tokens=config.max_completion_tokens,
-        max_retries=0,
-        timeout=config.timeout,
-        http_socket_options=(),
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        **transport,
-    )
 
 
 FetchPolicy = Callable[[PolicyQuery, str], Awaitable[PolicySearchResult]]
@@ -225,30 +208,29 @@ def execute_order(
         ) as client:
             # region 政策步骤绑定 Host 指定的检索范围并关联检索事件
             if isinstance(step, PolicyStep):
-                policy_tool = await bind_mcp_tool(client, McpToolName.SEARCH_POLICY.value, SearchPolicyRequest,
-                                                  PolicySearchResult)
+                policy_tool = await bind_mcp_tool(client, McpToolName.SEARCH_POLICY.value, PolicySearchResult)
 
                 # 绑定 Host 选择的范围并关联服务端检索事件。
                 async def fetch_policy(request: PolicyQuery, event_id: str) -> PolicySearchResult:
-                    return await policy_tool.call(SearchPolicyRequest(query=request.query, mode=mode).model_dump(mode="json"),
+                    return await policy_tool.call(SearchPolicyRequest(query=request.query, mode=mode),
                         timeout=ConnectionLimits.POLICY_CALL_SECONDS, meta=cast(RequestParamsMeta, {
                             "trace_id": trace_id, "tool_event_id": event_id,
                         }))
 
-                return await investigate_order(qwen(http_async_client=http), step, trace_id, fetch_policy, emit)
+                return await investigate_order(create_qwen_client(load_config().qwen, http_async_client=http), step, trace_id, fetch_policy, emit)
             # endregion
 
             # region 查单步骤绑定只读查单工具并关联订单读取事件
-            bound = await bind_mcp_tool(client, McpToolName.GET_ORDER.value, GetOrderRequest, OrderQueryResult)
+            bound = await bind_mcp_tool(client, McpToolName.GET_ORDER.value, OrderQueryResult)
 
             # 携带追踪和工具事件标识，调用 MCP 查单并返回结构化结果。
             async def fetch(request: GetOrderRequest, event_id: str) -> OrderQueryResult:
                 return await bound.call(
-                    request.model_dump(), timeout=ConnectionLimits.ORDER_CALL_SECONDS,
+                    request, timeout=ConnectionLimits.ORDER_CALL_SECONDS,
                     meta=cast(RequestParamsMeta, {"trace_id": trace_id, "tool_event_id": event_id}),
                 )
 
-            return await investigate_order(qwen(http_async_client=http), step, trace_id, fetch, emit)
+            return await investigate_order(create_qwen_client(load_config().qwen, http_async_client=http), step, trace_id, fetch, emit)
             # endregion
 
     # region 隔离异步调查上下文，异常时只记录错误类型并返回无观察
