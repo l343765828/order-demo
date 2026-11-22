@@ -1,7 +1,7 @@
 """政策检索请求和候选来源契约。"""
 import hashlib
 import math
-from typing import Annotated
+from typing import Annotated, Any, Self
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 from config.limits import PolicyLimits, RefundLimits
@@ -97,6 +97,20 @@ class PolicySearchResult(BaseModel):
     event_id: str
     # 按重排顺序返回的政策候选，检索失败或没有候选时为空列表。
     candidates: list[PolicyCandidate] = Field(max_length=PolicyLimits.MAX_RANKED_ENTRIES)
+
+    # 将 SDK 接收的检索结果恢复为具名模型和业务枚举。
+    @classmethod
+    def from_mcp(cls, data: dict[str, Any]) -> Self:
+        return cls.model_construct(
+            status=PolicySearchStatus(data['status']), event_id=data['event_id'],
+            candidates=[
+                PolicyCandidate.model_construct(
+                    document_id=item['document_id'], title=item['title'], version=item['version'],
+                    clause_id=item['clause_id'], entry_type=PolicyEntryType(item['entry_type']), text=item['text'],
+                )
+                for item in data['candidates']
+            ],
+        )
 
     # 检索失败时禁止将候选误认为可靠结果。
     @model_validator(mode='after')

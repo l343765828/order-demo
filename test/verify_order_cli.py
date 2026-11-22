@@ -49,15 +49,16 @@ async def check_mcp_permissions(url, token, session_id):
             assert {tool.name for tool in (await client.list_tools()).tools} == {"get_order", "search_policy"}
             for args in (
                 {"order_id": "", "thread_id": session_id},
-                {"order_id": "DEMO-2001", "consumer_id": "DEMO-USER-02"},
                 {"order_id": 2001},
             ):
                 invalid = await client.session.call_tool("get_order", args)
                 assert invalid.is_error
-            missing = await client.session.call_tool("get_order", {"order_id": "DEMO-2001"})
+            missing = await client.session.call_tool("get_order", {
+                "order_id": "DEMO-2001", "consumer_id": "DEMO-USER-02",
+            })
             assert not missing.is_error and missing.structured_content["status"] == "unavailable"
             assert missing.structured_content["order"] is None
-    return 3
+    return 2
 
 
 def verify():

@@ -3,7 +3,7 @@
 import argparse
 from enum import StrEnum
 from hmac import compare_digest
-from typing import Annotated, Any
+from typing import Any
 from uuid import UUID, uuid4
 
 import uvicorn
@@ -21,7 +21,7 @@ from config.demo import CONSUMER_ID
 from mcp_service.orders.query import query_order
 from mcp_service.policy import search
 from model import create_pool
-from model.orders.query import GetOrderRequest, OrderQueryId, OrderQueryResult
+from model.orders.query import GetOrderRequest, OrderQueryId
 from model.policy.search import PolicyQueryText, PolicySearchResult, PolicySearchScope
 from model.policy.status import PolicySearchStatus
 from model.refund.tool_name import McpToolName
@@ -59,45 +59,29 @@ def _log_tool_event(event: _McpEvent, ctx: ServerRequestContext, **fields) -> No
     )
 
 
-# 统一执行演示消费者鉴权及额外参数检查，工具分发交给 SDK。
+# 将 SDK 拒绝工具调用的结果记录到现有审计日志。
 class _OrderMcpServer(MCPServer):
-    # 声明已注册工具只接受签名中定义的参数字段。
-    async def list_tools(self) -> list[types.Tool]:
-        tools = await super().list_tools()
-        for tool in tools:
-            tool.input_schema["additionalProperties"] = False
-        return tools
-
-    # 校验访问身份及参数字段，保留拒绝结果和查单审计事件。
+    # 由 SDK 校验和执行工具，按拒绝原因保留现有失败响应和日志。
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: Context | None = None,
     ) -> types.CallToolResult | types.InputRequiredResult:
-        # region 仅执行 HTTP 已认证消费者发起的工具调用
-        ctx = context.request_context if context is not None else None
-        if ctx is None or getattr(getattr(ctx.request, "state", None), "consumer_id", None) != CONSUMER_ID:
-            return types.CallToolResult(content=[], is_error=True)
-        # endregion
-
-        # region 目标工具未注册时记录拒绝事件
-        tool = next((tool for tool in await self.list_tools() if tool.name == name), None)
-        if tool is None:
-            _log_tool_event(_McpEvent.TOOL_REJECTED, ctx, reason=_RejectionReason.UNKNOWN_TOOL.value)
-            return types.CallToolResult(content=[], is_error=True)
-        # endregion
-
-        # region 参数没有多余字段时交由 SDK 校验取值并调用工具
-        if arguments.keys() <= tool.input_schema["properties"].keys():
-            try:
-                return await super().call_tool(name, arguments, context)
-            except ToolError as exc:
-                if isinstance(exc, UnexpectedToolError) or not isinstance(exc.__cause__, ValidationError):
+        # region SDK 拒绝未知工具或无效参数时记录原有事件并返回工具错误
+        try:
+            return await super().call_tool(name, arguments, context)
+        except ToolError as exc:
+            if context is None or isinstance(exc, UnexpectedToolError):
+                raise
+            ctx = context.request_context
+            match exc.__cause__:
+                case None:
+                    _log_tool_event(_McpEvent.TOOL_REJECTED, ctx, reason=_RejectionReason.UNKNOWN_TOOL.value)
+                case ValidationError() if name == McpToolName.GET_ORDER.value:
+                    _log_tool_event(_McpEvent.TOOL_REJECTED, ctx, reason=_RejectionReason.BAD_ARGUMENTS.value)
+                case ValidationError():
+                    pass
+                case _:
                     raise
-        # endregion
-
-        # region 参数无效时拒绝执行，查单请求额外记录拒绝原因
-        if name == McpToolName.GET_ORDER.value:
-            _log_tool_event(_McpEvent.TOOL_REJECTED, ctx, reason=_RejectionReason.BAD_ARGUMENTS.value)
-        return types.CallToolResult(content=[], is_error=True)
+            return types.CallToolResult(content=[], is_error=True)
         # endregion
 
 
@@ -109,9 +93,9 @@ def make_app(pool, token: str):
     # 根据已认证的演示消费者身份查单，返回结构化结果供 Agent 使用。
     @server.tool(name=McpToolName.GET_ORDER.value, description="读取当前消费者本人的一笔演示订单。",
                  annotations=read_only)
-    def get_order(order_id: OrderQueryId, ctx: Context) -> Annotated[types.CallToolResult, OrderQueryResult]:
+    def get_order(order_id: OrderQueryId, ctx: Context) -> types.CallToolResult:
         # region 按认证身份读取订单并记录查询结果
-        result = query_order(pool, GetOrderRequest(order_id=order_id), CONSUMER_ID)
+        result = query_order(pool, GetOrderRequest.model_construct(order_id=order_id), CONSUMER_ID)
         _log_tool_event(_McpEvent.GET_ORDER, ctx.request_context, status=result.status.value)
         return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
         # endregion
@@ -121,7 +105,7 @@ def make_app(pool, token: str):
                  annotations=read_only)
     def search_policy(
         query: PolicyQueryText, mode: PolicySearchScope, ctx: Context,
-    ) -> Annotated[types.CallToolResult, PolicySearchResult]:
+    ) -> types.CallToolResult:
         from mcp_service.policy.backend import PolicyBackend
 
         # region 每次检索独立关闭后端连接，后端异常时返回失败状态及空候选
@@ -144,16 +128,15 @@ def make_app(pool, token: str):
     mcp = server.streamable_http_app(json_response=True, stateless_http=True)
     expected = f"Bearer {token}".encode("ascii")
 
-    # 校验 HTTP 访问凭据，在请求上下文中绑定固定演示消费者。
+    # 只让持有有效 HTTP 凭据的调用者以固定演示消费者身份使用工具。
     async def authenticated(scope: Scope, receive: Receive, send: Send) -> None:
-        # region HTTP 凭据缺失或不匹配时拒绝请求，校验通过后绑定演示消费者
+        # region HTTP 凭据缺失或不匹配时拒绝请求
         if scope["type"] == "http":
             headers = Headers(scope=scope).getlist("authorization")
             if len(headers) != 1 or not compare_digest(headers[0].encode("latin-1"), expected):
                 log_event(_McpEvent.AUTH_REJECTED.value)
                 await Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
                 return
-            scope.setdefault("state", {})["consumer_id"] = CONSUMER_ID
         # endregion
         await mcp(scope, receive, send)
 

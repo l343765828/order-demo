@@ -1,8 +1,8 @@
 """管理 MCP 会话，发现工具并执行单次调用。"""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 import httpx2
 from mcp import Client
@@ -31,20 +31,20 @@ async def open_mcp_client(url: str, *, token: str, read_timeout_seconds: float) 
             yield client
 
 
-# 保存已发现的 MCP 工具、结果契约及当前会话。
+# 保存已发现的 MCP 工具、结果转换函数及当前会话。
 class _BoundMcpTool(Generic[Result]):
-    # 绑定 MCP 会话、工具名称和用来校验响应的结果模型。
+    # 绑定 MCP 会话、工具名称及结构化结果的转换函数。
     def __init__(
         self,
         client: Client,
         name: str,
-        result: type[Result],
+        decode_result: Callable[[dict[str, Any]], Result],
     ) -> None:
         self._session = client.session
         self._name = name
-        self._result = result
+        self._decode_result = decode_result
 
-    # 发送已构造的请求模型，并按具名模型校验实际返回的结构化结果。
+    # 发送已构造的请求模型，并将 SDK 接收的结构化结果转换成业务模型。
     async def call(
         self, arguments: BaseModel, *, timeout: float | None = None,
         meta: RequestParamsMeta | None = None,
@@ -54,18 +54,18 @@ class _BoundMcpTool(Generic[Result]):
             self._name, arguments.model_dump(mode="json"), read_timeout_seconds=timeout, meta=meta,
         )
         # endregion
-        # region 拒绝工具错误，并按客户端契约校验成功响应
+        # region 拒绝工具错误，转换 SDK 已按工具 Schema 检查的结构化响应
         if response.is_error:
             raise RuntimeError(f"{self._name} returned a tool error")
-        return self._result.model_validate(response.structured_content)
+        return self._decode_result(cast(dict[str, Any], response.structured_content))
         # endregion
 
 
-# 发现唯一的目标工具并绑定结果模型，会话须在调用期间保持打开。
+# 发现唯一的目标工具并绑定结果转换函数，会话须在调用期间保持打开。
 async def bind_mcp_tool(
     client: Client,
     name: str,
-    result: type[Result],
+    decode_result: Callable[[dict[str, Any]], Result],
 ) -> _BoundMcpTool[Result]:
     # region 仅绑定单页目录中的唯一匹配，目录同时为 SDK 缓存工具元数据
     page = await client.list_tools()
@@ -73,4 +73,4 @@ async def bind_mcp_tool(
     if page.next_cursor or len(tools) != 1:
         raise ValueError(f"Expected exactly one {name} tool in an unpaginated catalog")
     # endregion
-    return _BoundMcpTool(client, name, result)
+    return _BoundMcpTool(client, name, decode_result)

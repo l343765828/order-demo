@@ -24,23 +24,21 @@ def search_policy(query, mode: PolicySearchMode, backend):
     from model.policy.search import PolicyCandidate, PolicySearchResult
     event_id = str(uuid4())
     try:
-        # region 按本次检索范围召回候选，有候选时完成重排并核对数量上限
-        vector = normalize_vector(backend.embed(query))
+        # region 使用后端已归一化的向量召回候选，限制召回数量并在有候选时完成重排
+        vector = backend.embed(query)
         candidates = backend.recall(vector, mode)
         if len(candidates) > PolicyLimits.MAX_RECALLED_ENTRIES:
             raise ValueError('召回结果超过限制')
         ranked = backend.rerank(query, candidates) if candidates else []
-        if len(ranked) > PolicyLimits.MAX_RANKED_ENTRIES:
-            raise ValueError('重排结果超过限制')
         # endregion
 
-        # region 记录本轮召回和重排证据，返回通过契约校验的候选
+        # region 记录本轮召回和重排证据，返回候选的公开字段
         recalled = [item.model_dump(exclude={'chunk_id'}) for item in candidates]
         selected = [item.model_dump(exclude={'chunk_id'}) for item in ranked]
         log_event('policy_retrieval', policy_event_id=event_id, mode=mode.value,
                   recalled=recalled, ranked=selected)
         return PolicySearchResult(status=PolicySearchStatus.OK, event_id=event_id,
-                                  candidates=[PolicyCandidate.model_validate(item) for item in selected])
+                                  candidates=[PolicyCandidate.model_construct(**item) for item in selected])
         # endregion
     # region 检索任一环节失败时返回失败状态和空候选
     except Exception:

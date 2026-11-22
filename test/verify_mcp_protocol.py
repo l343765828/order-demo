@@ -61,7 +61,7 @@ def probe_process(log: Path, *, schema_fault: str = "") -> Iterator[tuple[str, i
 
 
 def bind_echo(client: Client):
-    return bind_mcp_tool(client, "probe_echo", EchoResult)
+    return bind_mcp_tool(client, "probe_echo", lambda data: EchoResult.model_construct(**data))
 
 
 async def run(url: str, launcher_pid: int) -> None:

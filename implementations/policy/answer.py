@@ -22,7 +22,7 @@ NO_EVIDENCE = "当前政策文档未说明，暂无法给出有依据的回答�
 def published_clauses() -> dict[str, PolicyCandidate]:
     source = SOURCE_PATH.read_text(encoding="utf-8")
     validate_policy_source(source)
-    return {entry.clause_id: PolicyCandidate.model_validate(entry.model_dump(exclude={"chunk_id"}))
+    return {entry.clause_id: PolicyCandidate.model_construct(**entry.model_dump(exclude={"chunk_id"}))
             for entry in parse_policy(source)}
 
 

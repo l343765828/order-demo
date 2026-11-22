@@ -45,7 +45,7 @@ class Proxy(BaseHTTPRequestHandler):
 async def verify(url):
     global mode
     async with open_mcp_client(url, token='x'*40, read_timeout_seconds=60) as client:
-        tool = await bind_mcp_tool(client, 'search_policy', PolicySearchResult)
+        tool = await bind_mcp_tool(client, 'search_policy', PolicySearchResult.from_mcp)
         for mode in ('invalid_vector','rerank_failure','rerank_timeout'):
             before = counts.copy()
             result = await tool.call(SearchPolicyRequest(query='未发货能退款吗', mode=PolicySearchMode.FORMAL))

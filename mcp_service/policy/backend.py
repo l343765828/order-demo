@@ -102,8 +102,9 @@ class PolicyBackend:
 
     # 只写入本演示政策条目，不触碰其他集合或历史版本。
     def publish(self, entries: list[PolicyEntry]) -> None:
-        # region 构建并校验全部政策向量记录，再按稳定主键写入专用集合
-        records = [PolicyVectorRecord(**entry.model_dump(), embedding=self.embed(entry.text)) for entry in entries]
+        # region 结合已校验的政策条目与已归一化的向量，按稳定主键写入专用集合
+        records = [PolicyVectorRecord.model_construct(**entry.model_dump(), embedding=self.embed(entry.text))
+                   for entry in entries]
         self.create_collection()
         self.client.upsert(COLLECTION, [record.model_dump(mode='json') for record in records], timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
         self.client.flush(COLLECTION, timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)

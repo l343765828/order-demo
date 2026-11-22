@@ -1,5 +1,5 @@
 """只读订单查询契约；调用者必须先认证消费者身份。"""
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BeforeValidator, Field, model_validator
 
@@ -43,6 +43,21 @@ class OrderQueryResult(StrictModel):
     order: OrderDetails | None = None
     # 查询失败时供调用方使用的错误说明，其他状态为 None。
     error: str | None = None
+
+    # 将 SDK 接收的查单结果恢复为具名模型，供流程按枚举和属性读取。
+    @classmethod
+    def from_mcp(cls, data: dict[str, Any]) -> Self:
+        # region 返回包含订单详情时恢复嵌套模型和业务枚举
+        details = data.get("order")
+        order = None
+        if details is not None:
+            order = OrderDetails.model_construct(
+                order_id=details["order_id"], payment_status=PaymentStatus(details["payment_status"]),
+                shipping_status=ShippingStatus(details["shipping_status"]), refund_status=RefundStatus(details["refund_status"]),
+                paid_amount_fen=details["paid_amount_fen"], currency=details["currency"],
+            )
+        # endregion
+        return cls.model_construct(status=OrderQueryStatus(data["status"]), order=order, error=data.get("error"))
 
     # 校验查询状态、订单详情与错误信息之间的对应关系。
     @model_validator(mode="after")

@@ -22,7 +22,7 @@ async def verify(url, token, expect_failure):
         response = await http.post(url, json={})
         assert response.status_code == 401
     async with open_mcp_client(url, token=token, read_timeout_seconds=90) as client:
-        tool = await bind_mcp_tool(client, 'search_policy', PolicySearchResult)
+        tool = await bind_mcp_tool(client, 'search_policy', PolicySearchResult.from_mcp)
         if expect_failure:
             result = await tool.call(SearchPolicyRequest(query='退款', mode=PolicySearchMode.FORMAL), timeout=60)
             assert result.status is PolicySearchStatus.FAILED and not result.candidates

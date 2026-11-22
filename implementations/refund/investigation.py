@@ -96,13 +96,13 @@ async def investigate_order(
     @tool(McpToolName.GET_ORDER.value)
     async def get_order(order_id: str, runtime: ToolRuntime) -> str:
         """Get the authenticated consumer's order by its exact order ID."""
-        return await invoke_tool(GetOrderRequest(order_id=order_id), runtime)
+        return await invoke_tool(expected, runtime)
 
     # 提供政策查询，检索范围由 Host 选择。
     @tool(McpToolName.SEARCH_POLICY.value)
     async def search_policy(query: str, runtime: ToolRuntime) -> str:
         """Retrieve ranked refund policy candidates using the exact supplied query."""
-        return await invoke_tool(PolicyQuery(query=query), runtime)
+        return await invoke_tool(expected, runtime)
 
     # 在转发前核对工具、参数与预算，平行调用也只能发送一次。
     @wrap_tool_call
@@ -208,11 +208,11 @@ def execute_order(
         ) as client:
             # region 政策步骤绑定 Host 指定的检索范围并关联检索事件
             if isinstance(step, PolicyStep):
-                policy_tool = await bind_mcp_tool(client, McpToolName.SEARCH_POLICY.value, PolicySearchResult)
+                policy_tool = await bind_mcp_tool(client, McpToolName.SEARCH_POLICY.value, PolicySearchResult.from_mcp)
 
                 # 绑定 Host 选择的范围并关联服务端检索事件。
                 async def fetch_policy(request: PolicyQuery, event_id: str) -> PolicySearchResult:
-                    return await policy_tool.call(SearchPolicyRequest(query=request.query, mode=mode),
+                    return await policy_tool.call(SearchPolicyRequest.model_construct(query=request.query, mode=mode),
                         timeout=ConnectionLimits.POLICY_CALL_SECONDS, meta=cast(RequestParamsMeta, {
                             "trace_id": trace_id, "tool_event_id": event_id,
                         }))
@@ -221,7 +221,7 @@ def execute_order(
             # endregion
 
             # region 查单步骤绑定只读查单工具并关联订单读取事件
-            bound = await bind_mcp_tool(client, McpToolName.GET_ORDER.value, OrderQueryResult)
+            bound = await bind_mcp_tool(client, McpToolName.GET_ORDER.value, OrderQueryResult.from_mcp)
 
             # 携带追踪和工具事件标识，调用 MCP 查单并返回结构化结果。
             async def fetch(request: GetOrderRequest, event_id: str) -> OrderQueryResult:
