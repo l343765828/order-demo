@@ -78,7 +78,12 @@ class PolicyBackend(PolicySearchBackend):
 
         # region 重排索引完整且无重复时按顺序取前三条，否则拒绝本轮结果
         indexes = [item['index'] for item in results]
-        if len(indexes) != len(candidates) or set(indexes) != set(range(len(candidates))):
+        if (
+            # 重排结果数与送去重排的政策候选数不同。
+            len(indexes) != len(candidates)
+            # 返回的索引集合与原始候选位置不一致。
+            or set(indexes) != set(range(len(candidates)))
+        ):
             raise ValueError('无效重排结果')
         return [candidates[index] for index in indexes[:PolicyLimits.MAX_RANKED_ENTRIES]]
         # endregion
@@ -90,16 +95,38 @@ class PolicyBackend(PolicySearchBackend):
             description = self.client.describe_collection(PolicyLimits.MILVUS_COLLECTION_NAME)
             fields = {field['name']: field for field in description['fields']}
             lengths = PolicyLimits.FIELD_BYTES
-            if (set(fields) != set(lengths) | {'embedding'} or description['auto_id']
-                    or description.get('enable_dynamic_field')
-                    or not fields['chunk_id'].get('is_primary')
-                    or any(fields[name]['type'] != DataType.VARCHAR or fields[name]['params']['max_length'] != size
-                           for name, size in lengths.items())
-                    or fields['embedding']['type'] != DataType.FLOAT_VECTOR
-                    or fields['embedding']['params']['dim'] != PolicyLimits.VECTOR_DIMENSIONS):
+            if (
+                # 现有集合的字段与政策条目要求的字段不一致。
+                set(fields) != set(lengths) | {'embedding'}
+                # 集合会自动分配主键，政策发布需要写入自己的条目标识。
+                or description['auto_id']
+                # 集合允许动态字段，与政策条目的固定结构不符。
+                or description.get('enable_dynamic_field')
+                # 政策条目标识未设为主键。
+                or not fields['chunk_id'].get('is_primary')
+                # 至少一个政策文本字段的类型或长度上限不符。
+                or any(
+                    (
+                        # 政策文本字段未使用 VARCHAR 类型。
+                        fields[name]['type'] != DataType.VARCHAR
+                        # 政策文本字段的长度上限与发布约定不一致。
+                        or fields[name]['params']['max_length'] != size
+                    )
+                    for name, size in lengths.items()
+                )
+                # 政策向量字段未使用浮点向量类型。
+                or fields['embedding']['type'] != DataType.FLOAT_VECTOR
+                # 政策向量字段的维度与编码模型的输出维度不一致。
+                or fields['embedding']['params']['dim'] != PolicyLimits.VECTOR_DIMENSIONS
+            ):
                 raise ValueError('现有政策集合结构不兼容')
             index = self.client.describe_index(PolicyLimits.MILVUS_COLLECTION_NAME, 'embedding')
-            if index.get('index_type') != 'FLAT' or index.get('metric_type') != 'IP':
+            if (
+                # 政策向量索引未使用约定的 FLAT 类型。
+                index.get('index_type') != 'FLAT'
+                # 政策向量索引未使用约定的内积度量。
+                or index.get('metric_type') != 'IP'
+            ):
                 raise ValueError('现有政策集合索引不兼容')
             return
         # endregion

@@ -91,7 +91,12 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
                 raise SessionUnavailable
             cursor.execute("SELECT consumer_id FROM conversation_sessions WHERE session_id=%s", (session_id,))
             row = cursor.fetchone()
-            if row is None or row[0] != consumer_id:
+            if (
+                # 指定的退款会话没有记录。
+                row is None
+                # 指定的退款会话不属于当前消费者。
+                or row[0] != consumer_id
+            ):
                 raise SessionUnavailable
         yield Conversation(connection, session_id)
         # endregion

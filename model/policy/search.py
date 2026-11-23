@@ -84,7 +84,12 @@ class PolicyVectorRecord(PolicyEntry):
         if not all(math.isfinite(value) for value in values):
             raise ValueError('政策向量含非有限值')
         norm = math.sqrt(sum(value * value for value in values))
-        if not math.isfinite(norm) or abs(norm - 1) > PolicyLimits.VECTOR_NORM_TOLERANCE:
+        if (
+            # 政策向量的模长无法表示为有限数值。
+            not math.isfinite(norm)
+            # 模长与归一化目标 1 的偏差超过允许范围。
+            or abs(norm - 1) > PolicyLimits.VECTOR_NORM_TOLERANCE
+        ):
             raise ValueError('政策向量未归一化')
         return values
         # endregion
@@ -120,7 +125,12 @@ class PolicySearchResult(BaseModel):
     @model_validator(mode='after')
     def check_failure(self):
         # region 检索失败时只允许空候选列表
-        if self.status is PolicySearchStatus.FAILED and self.candidates:
+        if (
+            # 政策检索服务报告本轮失败。
+            self.status is PolicySearchStatus.FAILED
+            # 失败回执仍携带了可能被当作有效结果的政策候选。
+            and self.candidates
+        ):
             raise ValueError('检索失败不得返回候选')
         return self
         # endregion

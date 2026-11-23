@@ -45,7 +45,12 @@ class PolicyEvidence(StrictModel):
     @model_validator(mode='after')
     def require_citations(self):
         # region 声明依据充分时至少提供一条正式政策引用
-        if self.status is PolicyEvidenceStatus.SUFFICIENT and not self.citations:
+        if (
+            # 该结果声明退款政策依据充分。
+            self.status is PolicyEvidenceStatus.SUFFICIENT
+            # 结果没有附上可支持答复的正式条款引用。
+            and not self.citations
+        ):
             raise ValueError('充分证据必须包含正式条款')
         return self
         # endregion

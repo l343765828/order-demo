@@ -81,7 +81,12 @@ def answer_policy(decide: Decide, question: str, query: str, results: list[Polic
         ))
         retry = decision.retry_query
         index = decision.source_index
-        if index is not None and index in options:
+        if (
+            # 模型给出了拟采用的政策候选序号。
+            index is not None
+            # 所选序号属于本轮提供给模型的候选。
+            and index in options
+        ):
             item = usable[index][1]
             body = item.text.split("\n", 1)[-1]
             match item.entry_type:
@@ -96,12 +101,24 @@ def answer_policy(decide: Decide, question: str, query: str, results: list[Polic
                     required = [part.strip(" 。") for part in refs.split("、") if part.strip(" 。")]
                     available = {usable[i][1].clause_id: i for i in reversed(formal)}
                     missing = [clause for clause in required if clause not in available]
-                    if marker and required and not missing:
+                    if (
+                        # FAQ 正文包含「依据」标记。
+                        marker
+                        # FAQ 列出了需要引用的正式条款。
+                        and required
+                        # 本轮已检索到全部所需条款。
+                        and not missing
+                    ):
                         # region 正式出处齐备时采用 FAQ 正文并引用对应条款
                         selected = [available[clause] for clause in required]
                         answer = content.strip()
                         # endregion
-                    elif marker and missing:
+                    elif (
+                        # FAQ 正文包含「依据」标记。
+                        marker
+                        # 本轮仍缺少 FAQ 引用的正式条款。
+                        and missing
+                    ):
                         # region 正式出处缺失时生成补查文本
                         descriptions = " ".join(clauses[clause].text
                                                 for clause in missing if clause in clauses)
@@ -119,7 +136,12 @@ def answer_policy(decide: Decide, question: str, query: str, results: list[Polic
     evidence = PolicyEvidence(question=question, query=query,
                               status=PolicyEvidenceStatus.SUFFICIENT if citations else PolicyEvidenceStatus.INSUFFICIENT,
                               citations=citations)
-    if answer and verify_policy_evidence(evidence, results):
+    if (
+        # 已从候选中选出可展示的政策答复正文。
+        answer
+        # 正式条款引用已用本轮检索结果核验通过。
+        and verify_policy_evidence(evidence, results)
+    ):
         # region 存在答案且引用核验通过时输出答复与出处
         identifiers = "、".join(c.clause_id for c in citations)
         return f"{answer}\n依据：《{TITLE}》{identifiers}。", evidence, None

@@ -16,7 +16,7 @@ def search_policy(query: str, mode: PolicySearchMode, backend: PolicySearchBacke
 
     # region 执行政策召回与重排，记录并返回检索结果
     try:
-        # region 使用后端已归一化的向量召回候选，限制召回数量并在有候选时完成重排
+        # region 使用后端已归一化的向量从milvus召回候选，限制召回数量并在有候选时完成重排
         vector = backend.embed(query)
         candidates = backend.recall(vector, mode)
         if len(candidates) > PolicyLimits.MAX_RECALLED_ENTRIES:

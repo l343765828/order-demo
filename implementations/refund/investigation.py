@@ -129,7 +129,12 @@ async def investigate_order(
             args = type(expected).model_validate(call["args"])
         except ValidationError:
             return reject(request, "bad_arguments")
-        if call["name"] != name or args != expected:
+        if (
+            # 子 Agent 请求调用当前调查步骤未指定的工具。
+            call["name"] != name
+            # 工具入参与 Host 为当前调查步骤确认的参数不一致。
+            or args != expected
+        ):
             return reject(request, "wrong_tool_or_order")
         if attempted_call:
             return reject(request, "tool_budget")
@@ -142,9 +147,19 @@ async def investigate_order(
     async def verify_observation(request, handler):
         # region 按调用编号和正文核对模型收到的工具结果
         nonlocal observation_returned
-        if evidence is not None and not observation_returned:
+        if (
+            # 本次调查已取得实际工具结果，可以核对回传内容。
+            evidence is not None
+            # 尚未确认实际工具结果已经回传给模型。
+            and not observation_returned
+        ):
             for msg in request.messages:
-                if isinstance(msg, ToolMessage) and msg.tool_call_id == evidence.model_tool_call_id:
+                if (
+                    # 这条消息可作为模型收到的工具回执。
+                    isinstance(msg, ToolMessage)
+                    # 回执对应产生实际调查结果的那次工具调用。
+                    and msg.tool_call_id == evidence.model_tool_call_id
+                ):
                     if msg.content == evidence.result.model_dump_json():
                         observation_returned = True
                         emit("react_observation", model_tool_call_id=evidence.model_tool_call_id,
@@ -168,7 +183,12 @@ async def investigate_order(
         # region 只允许首次委派对应的子 Agent，并由 Host 提供已校验的任务描述
         nonlocal delegation_id
         call = request.tool_call
-        if call["name"] != "task" or call["args"].get("subagent_type") != agent:
+        if (
+            # 监督模型请求的工具不是用于委派子任务的工具。
+            call["name"] != "task"
+            # 委派目标与当前调查步骤指定的子 Agent 不一致。
+            or call["args"].get("subagent_type") != agent
+        ):
             return reject(request, "wrong_delegate")
         if delegation_id is not None:
             return reject(request, "delegation_budget")
@@ -204,9 +224,23 @@ async def investigate_order(
     # endregion
 
     # region 委派成功且真实结果已回传时接收观察，否则拒绝采用模型回复
-    if delegation_id and observation_returned and any(
-        isinstance(msg, ToolMessage) and msg.tool_call_id == delegation_id and msg.status != "error"
-        for msg in result["messages"]
+    if (
+        # Host 已记录本次子任务的委派编号。
+        delegation_id
+        # 实际工具结果已核实回传给模型。
+        and observation_returned
+        # 监督 Agent 的结果中有本次委派的非错误回执。
+        and any(
+            (
+                # 这条消息是一次工具调用的回执。
+                isinstance(msg, ToolMessage)
+                # 回执对应本次子任务委派。
+                and msg.tool_call_id == delegation_id
+                # 本次委派的回执未报告错误。
+                and msg.status != "error"
+            )
+            for msg in result["messages"]
+        )
     ):
         return evidence
     emit("agent_observation_rejected")

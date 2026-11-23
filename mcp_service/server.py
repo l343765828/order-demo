@@ -74,7 +74,12 @@ class _OrderMcpServer(MCPServer):
             return await super().call_tool(name, arguments, context)
         except ToolError as exc:
             # region 缺少请求上下文或发生非预期工具错误时继续抛出
-            if context is None or isinstance(exc, UnexpectedToolError):
+            if (
+                # 无法从调用上下文取得本次 MCP 请求信息。
+                context is None
+                # 工具执行出现非预期错误，需要向上层传播。
+                or isinstance(exc, UnexpectedToolError)
+            ):
                 raise
             # endregion
             # region 按拒绝原因记录未知工具或无效查单参数并返回工具错误
@@ -153,7 +158,12 @@ def make_app(pool, token: str):
         # region Authorization 请求头缺失、重复或凭据不匹配时返回 401
         if scope["type"] == "http":
             headers = Headers(scope=scope).getlist("authorization")
-            if len(headers) != 1 or not compare_digest(headers[0].encode("latin-1"), expected):
+            if (
+                # HTTP 请求缺少 Authorization 请求头或重复提供了该请求头。
+                len(headers) != 1
+                # 唯一的 Authorization 请求头与服务要求的 Bearer 凭据不匹配。
+                or not compare_digest(headers[0].encode("latin-1"), expected)
+            ):
                 log_event(_McpEvent.AUTH_REJECTED.value)
                 await Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
                 return

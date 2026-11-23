@@ -120,7 +120,12 @@ class TaskObservation(StrictModel):
         # region 观察须恰有一种工具结果，退款政策依据只可附于政策观察
         if (self.order_result is None) == (self.policy_result is None):
             raise ValueError("观察必须携带一种工具结果")
-        if self.policy_evidence is not None and self.policy_result is None:
+        if (
+            # 当前步骤的观察携带退款政策依据。
+            self.policy_evidence is not None
+            # 当前观察没有相应的政策检索结果。
+            and self.policy_result is None
+        ):
             raise ValueError("订单观察不能携带政策证据")
         return self
         # endregion

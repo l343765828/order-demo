@@ -13,7 +13,12 @@ class QwenChatOpenAI(ChatOpenAI):
         # region 移除助手消息中不兼容的名称字段，并拒绝未支持的工具选择方式
         payload = super()._get_request_payload(*args, **kwargs)
         choice = payload.get("tool_choice")
-        if isinstance(choice, str) and choice in {"required", "any"}:
+        if (
+            # 请求以字符串指定工具选择模式。
+            isinstance(choice, str)
+            # 请求使用当前 Qwen 接入不支持的强制工具选择模式。
+            and choice in {"required", "any"}
+        ):
             raise ValueError("Qwen tool_choice required/any is not supported")
         for message in payload["messages"]:
             if message.get("role") == "assistant":

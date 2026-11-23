@@ -42,7 +42,12 @@ def manage_demo_data(command: DemoDataCommand) -> None:
                         for order_id, consumer_id, payment, shipping, amount in rows:
                             cursor.execute("INSERT INTO orders (order_id,consumer_id,payment_status,shipping_status,paid_amount_fen,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE order_id=orders.order_id",
                                            (order_id, consumer_id, payment.value, shipping.value, amount))
-                            if order_id == "DEMO-1003" and cursor.rowcount == 1:
+                            if (
+                                # 当前订单是预置为已退款的演示样例。
+                                order_id == "DEMO-1003"
+                                # 本次初始化刚插入该订单，需要同时补入模拟退款记录。
+                                and cursor.rowcount == 1
+                            ):
                                 cursor.execute("INSERT INTO refunds (refund_id,order_id,amount_fen,source,created_at) VALUES ('MOCK-RF-1003','DEMO-1003',8800,'seed',UTC_TIMESTAMP(6))")
                         connection.commit()
                     except Exception:

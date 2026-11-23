@@ -70,7 +70,12 @@ def create_investigation_nodes(
             )])
             # endregion
 
-        elif decision.order_goal is OrderGoal.ELIGIBILITY and decision.order_id:
+        elif (
+            # 消费者在咨询指定订单的退款资格。
+            decision.order_goal is OrderGoal.ELIGIBILITY
+            # 已识别出要核对的订单号。
+            and decision.order_id
+        ):
             # region 指定订单的资格咨询先查订单，再检索适用政策
             investigation = InvestigationPlan(steps=[
                 InvestigationStep(step_id=HostStepId.ORDER.value, kind=InvestigationKind.INSPECT_ORDER,
@@ -87,8 +92,16 @@ def create_investigation_nodes(
                 "步骤没有依赖（depends_on 为空数组），完成条件是取得该订单的查询结果。",
             )
             step = investigation.steps[0]
-            if (len(investigation.steps) != 1 or not isinstance(step, InvestigationStep)
-                    or step.order_id != decision.order_id or step.depends_on):
+            if (
+                # 普通查单计划没有恰好一个步骤。
+                len(investigation.steps) != 1
+                # 计划安排的首步不是订单调查步骤。
+                or not isinstance(step, InvestigationStep)
+                # 计划中的订单号与当前意图确认的订单号不一致。
+                or step.order_id != decision.order_id
+                # 唯一的查单步骤声明了前置依赖。
+                or step.depends_on
+            ):
                 emit("plan_rejected", plan=investigation.model_dump())
                 return OrderStateUpdate(reply=ORDER_QUERY_INCOMPLETE)
             # endregion
@@ -136,9 +149,17 @@ def create_investigation_nodes(
         step = current_step(state)
         event = state.event
         # endregion
+
         # region 政策步骤核对本轮查询和回执，区分检索失败与已收到候选结果
         if isinstance(step, PolicyStep):
-            if not isinstance(event, PolicyToolEvent) or event.trace_id != state.trace_id or event.query != step.query:
+            if (
+                # 当前政策检索步骤没有收到政策工具回执。
+                not isinstance(event, PolicyToolEvent)
+                # 回执不属于当前会话轮次。
+                or event.trace_id != state.trace_id
+                # 工具实际查询的文本与当前步骤指定的文本不一致。
+                or event.query != step.query
+            ):
                 emit("observation_rejected", step_id=step.step_id)
                 return OrderStateUpdate(reply=POLICY_UNAVAILABLE)
             observation = TaskObservation(
@@ -153,8 +174,21 @@ def create_investigation_nodes(
         # endregion
 
         # region 查单步骤核对订单和回执归属，区分查到、无可操作订单及服务失败
-        if (not isinstance(event, OrderToolEvent) or event.trace_id != state.trace_id or event.order_id != step.order_id
-                or (event.result.order is not None and event.result.order.order_id != step.order_id)):
+        if (
+            # 当前查单步骤没有收到查单工具回执。
+            not isinstance(event, OrderToolEvent)
+            # 查单回执不属于当前会话轮次。
+            or event.trace_id != state.trace_id
+            # 工具实际查询的订单号与当前步骤指定的订单号不一致。
+            or event.order_id != step.order_id
+            # 回执中的订单详情与当前步骤指定的订单不一致。
+            or (
+                # 查单回执带回了一笔订单的详情。
+                event.result.order is not None
+                # 详情里的订单号与当前步骤指定的订单号不同。
+                and event.result.order.order_id != step.order_id
+            )
+        ):
             emit("observation_rejected", step_id=step.step_id)
             return OrderStateUpdate(reply=SERVICE_ERROR)
         statuses = {
@@ -175,18 +209,25 @@ def create_investigation_nodes(
     # 按真实观察继续、限次补查或结束，消费者回复只采用核验后的结果。
     def replan(state: OrderState) -> OrderStateUpdate:
         # region 缺少观察或计划时停止重规划
-        if state.observation is None or state.plan is None:
+        if (
+            # 当前调查步骤缺少已核验的工具观察。
+            state.observation is None
+            # 当前会话轮次缺少退款调查计划。
+            or state.plan is None
+        ):
             raise ValueError("缺少观察或调查计划")
         observation = state.observation
         # endregion
 
         # region 根据政策观察决定补查、答复或降级
         if observation.policy_result is not None:
+
             # region 检索失败时记录失败决定并返回政策不可用提示
             if observation.status is ObservationStatus.FAILED:
                 emit("replan", decision=ReplanDecision(action=ReplanAction.FAIL, reason="政策检索失败").model_dump(mode="json"))
                 return OrderStateUpdate(reply=POLICY_UNAVAILABLE)
             # endregion
+
             # region 核验政策候选并记录本轮证据
             step = current_step(state)
             assert isinstance(step, PolicyStep)
@@ -197,11 +238,20 @@ def create_investigation_nodes(
             observation.policy_evidence = evidence
             emit("policy_evidence", evidence=evidence.model_dump(mode="json"))
             # endregion
+
             # region 尚无答复且本轮未补查时仅补查一次正式条款
-            if reply is None and retry and not state.retry_query:
+            if (
+                # 本轮已检索的政策依据还不足以给出答复。
+                reply is None
+                # 政策答复模块提供了补查正式条款的查询文本。
+                and retry
+                # 本轮调查尚未安排政策补查。
+                and not state.retry_query
+            ):
                 emit("replan", decision=ReplanDecision(action=ReplanAction.CONTINUE, reason="仅补查一次正式条款").model_dump(mode="json"))
                 return OrderStateUpdate(retry_query=retry, policy_results=results, observation=observation)
             # endregion
+
             # region 结束政策调查并返回答复或依据不足提示
             emit("replan", decision=ReplanDecision(
                 action=ReplanAction.FINISH if reply else ReplanAction.FAIL, reason=evidence.status.value,
@@ -221,23 +271,22 @@ def create_investigation_nodes(
                 ).model_dump(mode="json"))
                 return OrderStateUpdate(step_index=1)
                 # endregion
+
             # region 缺少本人订单事实时按查单结果结束
             return OrderStateUpdate(reply=order_reply(result))
             # endregion
         # endregion
 
-        # region 普通查单要求模型决定与真实观察一致，再按订单事实回复
-        expected = ReplanAction.FAIL if observation.status is ObservationStatus.FAILED else ReplanAction.FINISH
-        decision = decide(
-            ReplanDecision,
-            f"唯一的查单步骤已结束。实际观察：{observation.model_dump_json()}。"
-            "如果观察状态是 failed，返回 fail；否则返回 finish。用一句话说明理由。",
-        )
-        emit("replan", decision=decision.model_dump())
-        if decision.action != expected:
-            # region 模型决定与真实观察不一致时结束查单
-            return OrderStateUpdate(reply=ORDER_QUERY_INCOMPLETE)
+        # region 根据普通查单的实际观察记录决定，并按订单事实回复
+        if observation.status is ObservationStatus.FAILED:
+            # region 订单服务查询失败时记录失败决定
+            decision = ReplanDecision(action=ReplanAction.FAIL, reason="订单查询失败")
             # endregion
+        else:
+            # region 订单服务正常返回查询结果时记录完成决定
+            decision = ReplanDecision(action=ReplanAction.FINISH, reason="唯一的查单步骤已结束")
+            # endregion
+        emit("replan", decision=decision.model_dump(mode="json"))
         return OrderStateUpdate(replan_decision=decision, reply=order_reply(result))
         # endregion
     # endregion
@@ -261,9 +310,16 @@ def investigation_failure(node: OrderFlowNode, state: OrderState) -> OrderStateU
     # endregion
 
     # region 政策或订单资格咨询失败时提示政策暂不可用
-    if state.decision and (
-        state.decision.intent is ConversationIntent.POLICY_QUESTION
-        or state.decision.order_goal is OrderGoal.ELIGIBILITY
+    if (
+        # 本轮已经识别出消费者的咨询意图。
+        state.decision
+        # 本轮问题需要退款政策依据。
+        and (
+            # 消费者直接询问退款政策。
+            state.decision.intent is ConversationIntent.POLICY_QUESTION
+            # 消费者询问某笔订单的退款资格。
+            or state.decision.order_goal is OrderGoal.ELIGIBILITY
+        )
     ):
         return OrderStateUpdate(reply=POLICY_UNAVAILABLE)
     # endregion

@@ -33,8 +33,14 @@ def resolve_intent(
 
     # region 提取订单号并判断沿用资格咨询或识别新意图
     candidates = {match.upper() for match in ORDER_NUMBER.findall(current)}
-    if (pending and ORDER_NUMBER.fullmatch(current.strip())
-            and len(current.strip()) <= RefundLimits.MAX_ORDER_ID_CHARS):
+    if (
+        # 会话中有一条退款资格咨询正在等待消费者补充订单号。
+        pending
+        # 本轮消息只包含一个格式可识别的订单号。
+        and ORDER_NUMBER.fullmatch(current.strip())
+        # 补充的订单号未超过长度上限。
+        and len(current.strip()) <= RefundLimits.MAX_ORDER_ID_CHARS
+    ):
         # region 只收到合规订单号时接续待补号的资格咨询
         decision = ConversationDecision(intent=ConversationIntent.ORDER_QUESTION, order_id=current.strip().upper(),
                                         order_goal=OrderGoal.ELIGIBILITY)
@@ -81,16 +87,30 @@ def resolve_intent(
             # endregion
         case ConversationIntent.ORDER_QUESTION:
             # region 查单时核对本轮编号，按结果追问、结束或规范化编号
-            if len(candidates) != 1 or decision.order_id is None:
+            if (
+                # 本轮消息未提供唯一的候选订单号。
+                len(candidates) != 1
+                # 意图识别结果未给出要查的订单号。
+                or decision.order_id is None
+            ):
                 # region 未确定唯一编号时追问，缺少资格咨询编号时保留待补问题
-                if not candidates and decision.order_goal is OrderGoal.ELIGIBILITY:
+                if (
+                    # 本轮消息没有可识别的订单号。
+                    not candidates
+                    # 消费者正在咨询某笔订单的退款资格。
+                    and decision.order_goal is OrderGoal.ELIGIBILITY
+                ):
                     resolution.eligibility_question = current
                     resolution.reply = "请提供要咨询资格的演示订单编号。"
                 else:
                     resolution.reply = "请提供一个要查询的演示订单编号。"
                 # endregion
-            elif (decision.order_id.upper() not in candidates
-                    or len(decision.order_id) > RefundLimits.MAX_ORDER_ID_CHARS):
+            elif (
+                # 意图识别给出的订单号未出现在消费者本轮消息中。
+                decision.order_id.upper() not in candidates
+                # 意图识别给出的订单号超过长度上限。
+                or len(decision.order_id) > RefundLimits.MAX_ORDER_ID_CHARS
+            ):
                 # region 编号与原文不符或超长时停止查单
                 resolution.reply = ORDER_QUERY_INCOMPLETE
                 # endregion

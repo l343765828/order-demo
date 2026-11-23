@@ -76,7 +76,12 @@ async def bind_mcp_tool(
     # region 仅绑定单页目录中的唯一匹配，目录同时为 SDK 缓存工具元数据
     page = await client.list_tools()
     tools = [tool for tool in page.tools if tool.name == name]
-    if page.next_cursor or len(tools) != 1:
+    if (
+        # 工具目录还有后续页，当前页无法确认全目录的匹配项。
+        page.next_cursor
+        # 当前页缺少指定工具或该工具名称重复。
+        or len(tools) != 1
+    ):
         raise ValueError(f"Expected exactly one {name} tool in an unpaginated catalog")
     return _BoundMcpTool(client, name, decode_result)
     # endregion

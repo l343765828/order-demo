@@ -84,22 +84,67 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                            policy=PolicyConfig(**data["policy"]) if "policy" in data else None)
         # endregion
         # region 校验连接字段、端口、模型限制和可选政策配置
-        if (not all(isinstance(value, str) and value for value in (
-                config.mysql.host, config.mysql.user, config.mysql.password, config.mcp.url,
-                config.mcp.read_token, config.mcp.host, config.qwen.base_url,
-                config.qwen.api_key, config.qwen.model))
-                or type(config.mysql.port) is not int or not 1 <= config.mysql.port <= 65535
-                or type(config.mcp.port) is not int or not 1 <= config.mcp.port <= 65535
-                or type(config.qwen.max_completion_tokens) is not int or config.qwen.max_completion_tokens < 1
-                or type(config.qwen.timeout) is not int or config.qwen.timeout < 1):
+        if (
+            # 必填连接、凭据或模型字段中有值不是非空字符串。
+            not all(
+                (
+                    # 连接配置字段使用字符串。
+                    isinstance(value, str)
+                    # 必填字段已填写。
+                    and value
+                )
+                for value in (
+                    config.mysql.host, config.mysql.user, config.mysql.password, config.mcp.url,
+                    config.mcp.read_token, config.mcp.host, config.qwen.base_url,
+                    config.qwen.api_key, config.qwen.model,
+                )
+            )
+            # MySQL 端口未配置为整数。
+            or type(config.mysql.port) is not int
+            # MySQL 端口不在有效范围内。
+            or not 1 <= config.mysql.port <= 65535
+            # MCP 服务端口未配置为整数。
+            or type(config.mcp.port) is not int
+            # MCP 服务端口不在有效范围内。
+            or not 1 <= config.mcp.port <= 65535
+            # 模型的最大输出 token 数未配置为整数。
+            or type(config.qwen.max_completion_tokens) is not int
+            # 模型的最大输出 token 数小于 1。
+            or config.qwen.max_completion_tokens < 1
+            # 模型请求超时未配置为整数。
+            or type(config.qwen.timeout) is not int
+            # 模型请求超时小于 1 秒。
+            or config.qwen.timeout < 1
+        ):
             raise ValueError
-        if config.policy is not None and not all(isinstance(value, str) and value.strip() for value in (
-                config.policy.milvus_uri, config.policy.milvus_token, config.policy.model_base)):
+        if (
+            # 已提供可选的政策检索配置。
+            config.policy is not None
+            # 政策向量库地址、凭据或模型服务地址中有值不是有效文本。
+            and not all(
+                (
+                    # 政策检索连接字段使用字符串。
+                    isinstance(value, str)
+                    # 字段去掉首尾空白后仍有内容。
+                    and value.strip()
+                )
+                for value in (config.policy.milvus_uri, config.policy.milvus_token, config.policy.model_base)
+            )
+        ):
             raise ValueError
         token = config.mcp.read_token
         # endregion
         # region 校验 MCP 凭据后返回配置
-        if len(token) < 32 or not token.isascii() or not token.isprintable() or any(c.isspace() for c in token):
+        if (
+            # MCP 凭据短于最低长度要求。
+            len(token) < 32
+            # MCP 凭据包含非 ASCII 字符。
+            or not token.isascii()
+            # MCP 凭据包含不可打印字符。
+            or not token.isprintable()
+            # MCP 凭据包含空白字符。
+            or any(c.isspace() for c in token)
+        ):
             raise ValueError
         return config
         # endregion

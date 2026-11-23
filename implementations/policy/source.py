@@ -17,9 +17,14 @@ FAQ_IDS = frozenset(f'FAQ-{number:03d}' for number in range(1, 8))
 # 当前发布入口只支持固定文档和版本，拒绝错误标注来源。
 def validate_policy_source(source: str) -> None:
     # region 标题、文档编号或版本与发布目标不匹配时拒绝发布
-    if not (source.startswith(f'# {TITLE}\n')
-            and re.search(rf'^文档编号：{re.escape(DOCUMENT_ID)}\s*$', source, re.MULTILINE)
-            and re.search(rf'^版本：{re.escape(VERSION)}\s*$', source, re.MULTILINE)):
+    if not (
+        # 文档以当前发布的正式政策标题开头。
+        source.startswith(f'# {TITLE}\n')
+        # 文档编号与本次发布的政策编号一致。
+        and re.search(rf'^文档编号：{re.escape(DOCUMENT_ID)}\s*$', source, re.MULTILINE)
+        # 文档版本与本次发布的政策版本一致。
+        and re.search(rf'^版本：{re.escape(VERSION)}\s*$', source, re.MULTILINE)
+    ):
         raise ValueError('政策文档标头不匹配当前发布版本')
     # endregion
 

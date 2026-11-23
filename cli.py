@@ -24,7 +24,12 @@ def main() -> int:
     mode.add_argument("--history", action="store_true", help="读取原文与当前 checkpoint 状态")
     mode.add_argument("--init-checkpoints", action="store_true", help="显式初始化 checkpoint 表")
     args = parser.parse_args()
-    if args.history and not args.session:
+    if (
+        # 调用方请求查看会话历史。
+        args.history
+        # 未指定要查看的会话编号。
+        and not args.session
+    ):
         parser.error("--history 需要 --session")
     # endregion
 

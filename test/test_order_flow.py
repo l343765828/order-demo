@@ -57,6 +57,39 @@ def test_graph_rejects_invalid_plan_before_dispatch(plan):
     assert state["reply"] == "本轮未能完成订单查询，请稍后再试。"
 
 
+@pytest.mark.parametrize("result_data, action, reply", [
+    ({"status": "found", "order": {
+        "order_id": "DEMO-1001", "payment_status": "paid", "shipping_status": "unshipped",
+        "refund_status": "not_refunded", "paid_amount_fen": 19900, "currency": "CNY",
+    }}, "finish", "订单 DEMO-1001：已支付，未发货，无模拟退款记录，实付 19900 分。"),
+    ({"status": "unavailable"}, "finish", "未找到可操作的订单。"),
+    ({"status": "failed", "error": "查询服务不可用"}, "fail", "订单服务暂时不可用，请稍后再试。"),
+])
+def test_plain_order_query_finishes_without_another_model_call(result_data, action, reply):
+    def decide(schema, _prompt):
+        if schema.__name__ == "ConversationDecision":
+            return schema(intent="order_question", order_id="DEMO-1001")
+        if schema.__name__ == "InvestigationPlan":
+            return schema(steps=[InvestigationStep(
+                step_id="order", kind="inspect_order", order_id="DEMO-1001",
+                depends_on=[], completion="获得订单查询结果",
+            )])
+        pytest.fail("普通查单收尾不应再次调用模型")
+
+    def investigate(step, trace_id):
+        return OrderToolEvent(event_id="order-event", trace_id=trace_id, model_tool_call_id="model-call",
+                              order_id=step.order_id, result=OrderQueryResult.model_validate(result_data))
+
+    events = []
+    graph = build_graph(decide, investigate, lambda name, **fields: events.append((name, fields)),
+                        search=unexpected_policy_search)
+    state = graph.invoke({"history": [{"role": "user", "content": "查一下 DEMO-1001"}],
+                          "trace_id": "test"})
+    assert state["reply"] == reply
+    assert state["replan_decision"]["action"] == action
+    assert [fields["decision"] for name, fields in events if name == "replan"] == [state["replan_decision"]]
+
+
 def test_typed_graph_continues_legacy_checkpoint_without_losing_partial_updates():
     def decide(*_):
         pytest.fail("补充订单号时不应再次分类")
