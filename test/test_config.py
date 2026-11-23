@@ -64,7 +64,7 @@ def test_policy_settings_must_be_complete_without_exposing_credentials(tmp_path,
 
 
 def test_policy_backend_uses_selected_configuration(tmp_path, monkeypatch, local_settings):
-    import mcp_service.policy.backend as backend
+    import implementations.policy.backend as backend
     from config import use_config
     local_settings["policy"] = {"milvus_uri": "http://configured:19530", "milvus_token": "private", "model_base": "http://configured:8000/"}
     path = tmp_path / "settings.json"
@@ -85,7 +85,7 @@ def test_policy_backend_uses_selected_configuration(tmp_path, monkeypatch, local
 
 def test_policy_backend_requires_policy_section(tmp_path, local_settings):
     from config import use_config
-    from mcp_service.policy.backend import PolicyBackend
+    from implementations.policy.backend import PolicyBackend
     local_settings.pop("policy", None)
     path = tmp_path / "settings.json"
     path.write_text(json.dumps(local_settings), encoding="utf-8")

@@ -120,9 +120,8 @@ def verify():
                         original = "查一下 DEMO-1001"
                         own, own_events, _ = cli("--session", sid, user_input=original + "\n")
                         assert "实付 19900 分" in own and "已支付，未发货" in own, own_events
-                        assert [x["node"] for x in own_events if x["event"] == "graph_node"] == [
-                            "intent", "plan", "execute", "observe", "replan"
-                        ]
+                        nodes = [x["node"] for x in own_events if x["event"] == "graph_node"]
+                        assert nodes == ["intent", "preferences", "plan", "execute", "observe", "replan"]
                         first = {event["event"]: event for event in own_events}
                         seen = first["react_call"]
                         assert seen["model_tool_call_id"] == first["react_observation"]["model_tool_call_id"]
@@ -182,7 +181,7 @@ def verify():
             print(json.dumps({
                 "session_id": sid, "trace_id": seen["trace_id"], "host_pid": seen["pid"],
                 "server_pid": receipt["pid"], "reopened_host_pid": loaded["pid"],
-                "nodes": ["intent", "plan", "execute", "observe", "replan"],
+                "nodes": nodes,
                 "plan": first["plan"]["plan"], "delegation_id": first["deepagent_delegate"]["delegation_id"],
                 "model_tool_call_id": seen["model_tool_call_id"], "mcp_request_id": receipt["mcp_request_id"],
                 "tool_event_id": seen["tool_event_id"], "order_result": first["mcp_observation"]["result"],

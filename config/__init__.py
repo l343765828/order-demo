@@ -3,6 +3,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from config.demo import DEMO_DATABASE
+from config.limits import ConnectionLimits, PolicyLimits
+
 DEFAULT_PATH = Path(__file__).with_name("local.json")
 _config_path = DEFAULT_PATH
 
@@ -18,6 +21,8 @@ class MySQLConfig:
     user: str
     # 数据库账号的连接密码，从本地配置读取。
     password: str
+    # 订单、会话和检查点所在库，隔离验收可指向专用库。
+    database: str = DEMO_DATABASE
 
 
 # 保存 MCP 服务地址、监听端口和只读访问凭据。
@@ -31,6 +36,8 @@ class MCPConfig:
     read_token: str
     # MCP 服务的监听地址，默认只接受本机连接。
     host: str = "127.0.0.1"
+    # 固定执行节点和 MCP Server 共用的独立凭据。为空时保持只读运行。
+    write_token: str | None = None
 
 
 # 保存 Qwen 模型服务地址和访问凭据。
@@ -57,6 +64,10 @@ class PolicyConfig:
     milvus_token: str
     # 政策原文和查询使用的向量服务及候选重排服务的共同基址。
     model_base: str
+    # 政策目录所在的 MySQL 数据库，隔离验收时与独立集合配套配置。
+    catalog_database: str = PolicyLimits.CATALOG_DATABASE
+    # 政策索引集合，与上述目录配套管理。
+    milvus_collection: str = PolicyLimits.MILVUS_COLLECTION_NAME
 
 
 # 汇总演示应用使用的 MySQL、MCP、Qwen 和政策检索配置。
@@ -70,6 +81,17 @@ class AppConfig:
     qwen: QwenConfig
     # 政策检索和发布所需的后端配置，未提供时为 None。
     policy: PolicyConfig | None = None
+    # Host 保存最终政策事件的目录。为空时暂停新写入，原结果仍可查询。
+    refund_policy_events_dir: str | None = None
+
+
+# 校验 MCP 凭据为足够长且可安全放入 HTTP 请求头的字符串。
+def _valid_mcp_token(token: object) -> bool:
+    # region 核对长度、ASCII 编码及可见字符
+    return isinstance(token, str) and len(token) >= ConnectionLimits.MCP_TOKEN_MIN_CHARS and all(
+        "!" <= character <= "~" for character in token
+    )
+    # endregion
 
 
 # 读取并校验指定 JSON 配置，返回应用配置；错误信息不包含配置值。
@@ -81,7 +103,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         data = json.loads(source.read_text(encoding="utf-8"))
         config = AppConfig(mysql=MySQLConfig(**data["mysql"]), mcp=MCPConfig(**data["mcp"]),
                            qwen=QwenConfig(**data["qwen"]),
-                           policy=PolicyConfig(**data["policy"]) if "policy" in data else None)
+                           policy=PolicyConfig(**data["policy"]) if "policy" in data else None,
+                           refund_policy_events_dir=data.get("refund_policy_events_dir"))
         # endregion
         # region 校验连接字段、端口、模型限制和可选政策配置
         if (
@@ -95,7 +118,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 )
                 for value in (
                     config.mysql.host, config.mysql.user, config.mysql.password, config.mcp.url,
-                    config.mcp.read_token, config.mcp.host, config.qwen.base_url,
+                    config.mysql.database, config.mcp.read_token, config.mcp.host, config.qwen.base_url,
                     config.qwen.api_key, config.qwen.model,
                 )
             )
@@ -128,22 +151,30 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                     # 字段去掉首尾空白后仍有内容。
                     and value.strip()
                 )
-                for value in (config.policy.milvus_uri, config.policy.milvus_token, config.policy.model_base)
+                for value in (config.policy.milvus_uri, config.policy.milvus_token, config.policy.model_base,
+                              config.policy.catalog_database, config.policy.milvus_collection)
             )
         ):
             raise ValueError
-        token = config.mcp.read_token
         # endregion
         # region 校验 MCP 凭据后返回配置
         if (
-            # MCP 凭据短于最低长度要求。
-            len(token) < 32
-            # MCP 凭据包含非 ASCII 字符。
-            or not token.isascii()
-            # MCP 凭据包含不可打印字符。
-            or not token.isprintable()
-            # MCP 凭据包含空白字符。
-            or any(c.isspace() for c in token)
+            # 只读凭据格式不适合 HTTP 认证。
+            not _valid_mcp_token(config.mcp.read_token)
+            # 已启用执行身份但凭据不合规或与只读凭据相同。
+            or (
+                # 配置启用了 MCP 受控执行。
+                config.mcp.write_token is not None
+                # 两个身份未形成独立的有效凭据。
+                and (not _valid_mcp_token(config.mcp.write_token) or config.mcp.write_token == config.mcp.read_token)
+            )
+            # 配置提供了无效的政策事件目录。
+            or (
+                # Host 配置了关键事件的保存目录。
+                config.refund_policy_events_dir is not None
+                # 目录值不是可用的非空路径文本。
+                and (not isinstance(config.refund_policy_events_dir, str) or not config.refund_policy_events_dir.strip())
+            )
         ):
             raise ValueError
         return config

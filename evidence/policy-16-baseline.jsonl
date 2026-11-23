@@ -1,0 +1,1 @@
+{"case": "legacy_baseline_adoption", "catalog_database": "order_demo_p16_036d82576c10", "same_source_reclassification_rejected": true, "milvus_mutations": 0, "result": {"status": "activated", "target": {"document_id": "DEMO-REFUND-POLICY", "version": "1.0"}, "catalog_revision": 1, "entry_count": 21}}

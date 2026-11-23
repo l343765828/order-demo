@@ -25,6 +25,7 @@ def test_decision_enums_preserve_string_contract():
     assert decision.order_goal is OrderGoal.ELIGIBILITY
     assert decision.model_dump(mode="json") == {
         "intent": "order_question", "order_id": "DEMO-1001", "order_goal": "eligibility",
+        "memory_request": None, "temporary_detail": None,
     }
     assert ReplanDecision.model_validate({"action": "finish", "reason": "完成"}).action is ReplanAction.FINISH
 from model.orders.status import OrderQueryStatus

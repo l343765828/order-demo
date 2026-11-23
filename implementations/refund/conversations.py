@@ -33,20 +33,23 @@ class Conversation:
         # endregion
 
     # 为当前会话分配下一消息序号，写入原文并提交事务。
-    def append(self, message: ExchangeMessage) -> None:
+    def append(self, message: ExchangeMessage) -> int:
         # region 当前会话独占期间提交原文，保证序号和落库顺序
         with self.connection.cursor() as cursor:
+            cursor.execute("SELECT COALESCE(MAX(sequence), 0)+1 FROM conversation_messages WHERE session_id=%s",
+                           (self.session_id,))
+            sequence = int(cursor.fetchone()[0])
             cursor.execute(
                 "INSERT INTO conversation_messages (session_id, sequence, role, content, created_at) "
-                "SELECT %s, COALESCE(MAX(sequence), 0)+1, %s, %s, UTC_TIMESTAMP(6) "
-                "FROM conversation_messages WHERE session_id=%s",
-                (self.session_id, message.role, message.content, self.session_id),
+                "VALUES (%s,%s,%s,%s,UTC_TIMESTAMP(6))",
+                (self.session_id, sequence, message.role.value, message.content),
             )
             cursor.execute(
                 "UPDATE conversation_sessions SET updated_at=UTC_TIMESTAMP(6) WHERE session_id=%s",
                 (self.session_id,),
             )
         self.connection.commit()
+        return sequence
         # endregion
 
 

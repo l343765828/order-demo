@@ -8,6 +8,8 @@
 
 **第一条真实业务路径在 04。** 消费者在 CLI 输入“查一下 DEMO-1001”，Host 载入并保存会话，经外层 LangGraph 计划和执行、DeepAgent 委派及 ReAct 调用独立的 Streamable HTTP MCP Server，Server 从真实 MySQL 读回本人订单。实付金额为 19900 分，进程、工具与会话均可追溯，全程退款写调用数为零。这条路径验证 01、02、03 可以合用；BGE、Milvus 和重排服务可随 05 并行接入。
 
+**当前续做顺序为 15 → 16 → 07。** 05 和 06 已形成政策检索、咨询和资格说明的验收基线。15 先让 Host 仅凭本轮 MCP 回执完成政策咨询和引用核验，16 再接入发布目录与多文档版本切换。07 使用这套已验收的版本机制接通首次模拟退款。
+
 **第一条完整退款路径在 07，08 补齐多轮办理。** 07 从“如果能退，就帮我退 DEMO-1001”开始，真实查单后从召回阶段仅检索 RF，经正式政策证据核验，严格按政策事件持久化 → 提交持久化 → 受控 MCP 写入的顺序产生一笔模拟退款。08 再用“我要退款 → DEMO-1001”及取消、换单、插入咨询检验多轮授权。
 
 | 工单 | 直接阻塞 | 独立验收结果 |
@@ -18,19 +20,22 @@
 | [04 本人查单](issues/04-read-own-order-end-to-end.md) | 01、02、03 | 正常 CLI 经真实 Qwen、MCP、MySQL 查本人订单 |
 | [05 政策发布与检索](issues/05-publish-and-search-refund-policy.md) | 03 | 独立入库后经真实 MCP 返回已重排的当前版候选 |
 | [06 政策和资格咨询](issues/06-answer-policy-and-order-eligibility.md) | 04、05 | 带正式出处的咨询和真实订单资格解释，全程只读 |
-| [07 首次模拟退款](issues/07-submit-one-mock-refund.md) | 06 | 明确授权后只写一次，政策事件、提交和实际退款可追溯 |
+| [15 移除 Host 的政策文件依赖](issues/15-remove-host-policy-file-dependency.md) | 05、06 | 无本地政策 Markdown 时完成 FAQ 与正式条款共同选答、必要的语义补查与引用核验 |
+| [16 政策发布目录与多文档版本切换](issues/16-publish-policy-catalog-revisions.md) | 15 | 可独立发布、重试同版本和切换生效版本，旧调查沿用版本快照 |
+| [07 首次模拟退款](issues/07-submit-one-mock-refund.md) | 16 | 明确授权后只写一次，政策版本、读取事件、提交和实际退款可追溯 |
 | [08 多轮授权](issues/08-manage-multiturn-refund-authorization.md) | 07 | 补单、取消、换单和继续只依据当前会话授权 |
 | [09 重复与回执核对](issues/09-reconcile-duplicate-and-lost-receipts.md) | 07 | 并发无重复退款，回执丢失和重启只读核对 |
 | [10 维护关闭与恢复办理](issues/10-close-dispatch-and-resume-refund.md) | 08、09 | 安全关闭旧提交并封住迟到请求，两条重新办理路径均重新核验 |
 | [11 显式长期偏好](issues/11-manage-explicit-preferences.md) | 04 | 从聊天管理当前偏好，重启不恢复已删除的值 |
 | [12 长会话压缩](issues/12-compress-long-conversations.md) | 08、11 | 预算内保留必要上下文，超窗失败不写入 |
-| [13 演示数据重置](issues/13-reset-only-demo-data.md) | 10、12 | 停流后清理本演示 MySQL 及 checkpoint，政策索引仍可检索 |
+| [13 演示数据重置](issues/13-reset-only-demo-data.md) | 10、12 | 停流后重置会话及模拟业务数据，保留政策发布目录和索引 |
 | [14 两服务部署与联合验收](issues/14-deploy-and-verify-two-services.md) | 13 | 在目标环境运行首版及关键故障回归 |
 
 ## 并行与汇合点
 
 - **开工前沿为 01、02、03。** 先开建库票，同时验证 checkpointer 与协议。02、03 各自收敛可用依赖，合入 04 前对齐两者的 LangGraph／DeepAgent 版本。
 - **03 完成后可做 05。** 政策发布与检索可独立验收，04 继续取决于实际 MySQL 和 checkpoint。04 完成后可开 11，04 和 05 汇合后开 06。
+- **05、06 验收后做 15，再做 16。** 15 验收 Host 和 MCP 的新读取契约，16 验收用该契约读取新旧版本，随后开始 07。
 - **07 完成后并行做 08、09。** 08 负责当前会话意图和撤销，09 负责跨会话提交状态和回执核对。两者汇合后做 10。08 和 11 完成后，12 可与 09 或 10 的剩余工作并行。10、12 汇合后做 13，最后交给 14 联验。
 
 ## 外部前提与实际卡点
@@ -46,7 +51,8 @@
 
 ## 定稿依据
 
-业务语义采用术语表、当前专题定稿和 ADR。采用七张应用表、正常重启保留数据、重排失败时政策检索失败，以及旧提交关闭后原会话与新会话各自明确发起的恢复规则。排序和工单边界由本次施工拆分确定。
+业务语义采用术语表、当前专题定稿和 ADR。七张原应用表负责会话及模拟业务数据，16 另行交付政策发布目录。正常重启保留数据，重排失败时政策检索失败，旧提交关闭后由原会话或新会话明确发起恢复办理。
 
 - [术语表](../../GLOSSARY.md) · [主设计](spec.md) · [数据库设计](database-design.md) · [存储与记忆](storage-memory.md) · [MCP 接入](mcp-integration.md) · [上下文压缩](context-compression.md) · [退款政策](../../policy/refund-policy.md) · [模型选型](model-selection.md) · [接口契约](integration-contracts.md)
 - [ADR-0003 原生模型协议](../../docs/adr/0003-refund-agent-native-model-protocol.md) · [ADR-0004 存储](../../docs/adr/0004-refund-agent-storage-boundaries.md) · [ADR-0005 压缩](../../docs/adr/0005-refund-conversation-compression-owner.md) · [ADR-0006 MCP 边界](../../docs/adr/0006-refund-agent-mcp-service-boundary.md) · [ADR-0007 未决提交](../../docs/adr/0007-refund-unconfirmed-dispatch.md) · [ADR-0008 办理授权](../../docs/adr/0008-refund-authorization-per-dispatch.md) · [ADR-0009 政策持久证据](../../docs/adr/0009-refund-policy-evidence-before-dispatch.md)
+- [ADR-0010 政策版本与本轮引用](../../docs/adr/0010-refund-policy-publication-and-evidence.md)

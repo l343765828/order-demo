@@ -8,23 +8,29 @@ from pydantic import BeforeValidator, Field, WithJsonSchema, model_validator
 from config.limits import RefundLimits
 from model.base import StrictModel
 from model.orders.query import OrderQueryResult
-from model.policy.search import PolicySearchResult
+from model.policy.search import PolicyCatalogRevision, PolicySearchResult
 from model.policy.evidence import PolicyEvidence
 from model.base import status_schema
-from model.refund.status import ConversationIntent, InvestigationKind, ObservationStatus, OrderGoal, ReplanAction
+from model.refund.preference import DetailValue, PreferenceCommand, PreferenceResult
+from model.refund.status import ConversationIntent, ConversationRole, InvestigationKind, ObservationStatus, OrderGoal, ReplanAction
+from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerification, RefundResult, RefundTurnSource
 
 
 # 定义退款业务流程使用的 LangGraph 节点标识。
 class OrderFlowNode(StrEnum):
     INTENT = "intent"  # 识别本轮意图并初始化调查状态。
+    PREFERENCES = "preferences"  # 处理当前长期偏好命令并准备当轮表达。
     PLAN = "plan"  # 制定或核对本轮只读调查计划。
     EXECUTE = "execute"  # 执行当前调查步骤并取得工具结果。
     OBSERVE = "observe"  # 核对工具结果是否属于本轮和当前步骤。
     REPLAN = "replan"  # 根据已核对的结果继续调查或生成回复。
+    REVIEW_REFUND = "review_refund"  # 固定业务节点重查订单并持久保存最终核验依据。
+    SEND_REFUND = "send_refund"  # 固定业务节点持久保存提交并受控发送一次。
+    REFUND_REPLY = "refund_reply"  # 将可信退款结果填入消费者回复。
 
 
-# 保存模型识别出的消费者意图及当前消息中的订单号。
-class ConversationDecision(StrictModel):
+# 保存模型识别的业务意图以及当前消息中的订单号。
+class BusinessConversationDecision(StrictModel):
     # 消费者本轮请求的意图，用于选择查单、政策咨询或澄清等路径。
     intent: Annotated[ConversationIntent, BeforeValidator(ConversationIntent), status_schema(ConversationIntent, "Intent")]
     # 从本轮消息中识别的订单号，消费者未提供时为 None。
@@ -35,6 +41,14 @@ class ConversationDecision(StrictModel):
         WithJsonSchema({"anyOf": [{"type": "string", "enum": [goal.value for goal in OrderGoal]},
                                  {"type": "null"}], "title": "Order Goal"}),
     ] = None
+
+
+# 将模型业务判断和当前消息中解析出的偏好指令组合成完整意图。
+class ConversationDecision(BusinessConversationDecision):
+    # 当前消息中的显式长期偏好命令，可与业务意图同时存在。
+    memory_request: PreferenceCommand | None = None
+    # 仅本轮适用的订单状态表达方式，不写入偏好表。
+    temporary_detail: DetailValue | None = None
 
 
 # 描述一个查单步骤，包括订单、依赖关系和完成条件。
@@ -59,6 +73,8 @@ class PolicyStep(StrictModel):
     kind: Annotated[Literal[InvestigationKind.RETRIEVE_POLICY], BeforeValidator(InvestigationKind)]
     # 用于检索退款政策的查询文本，可根据订单事实或补查需要替换。
     query: str = Field(min_length=1, max_length=RefundLimits.MAX_POLICY_QUERY_CHARS)
+    # Host 为补查填入首次成功检索的目录修订，初始计划不指定修订。
+    catalog_revision: PolicyCatalogRevision | None = None
     # 检索前所依赖的步骤标识列表，空列表表示可直接检索。
     depends_on: list[str]
     # 描述步骤预期取得的结果。流程依据实际检索状态和证据决定后续处理。
@@ -142,7 +158,7 @@ class ReplanDecision(StrictModel):
 # 描述会话原文中的消息角色和内容。
 class ExchangeMessage(StrictModel):
     # 发言方，取 user 时是消费者，取 assistant 时是助手。
-    role: Literal["user", "assistant"]
+    role: Annotated[ConversationRole, BeforeValidator(ConversationRole)]
     # 发言方的消息原文，供会话回放和后续意图识别使用。
     content: str
 
@@ -153,12 +169,18 @@ class OrderTurn(StrictModel):
     history: list[ExchangeMessage]
     # 本轮请求唯一的追踪编号，用于串联图节点、工具调用和政策依据核对。
     trace_id: str
+    # 实际 Host 提供的本轮原始用户消息位置，旧 checkpoint 可缺省。
+    refund_source: RefundTurnSource | None = None
 
 
 # 描述节点可以写入的字段。省略字段表示保留旧值，显式传入 None 表示清空。
 class OrderStateUpdate(StrictModel):
     # 本轮识别出的消费者意图、订单号和查询目标。
     decision: ConversationDecision | None = None
+    # 本轮显式偏好命令的真实结果，隐式读取不填此字段。
+    preference_result: PreferenceResult | None = None
+    # 本轮有效的订单答复详略，新轮从当前偏好或临时要求重新计算。
+    response_detail: DetailValue | None = None
     # 本轮查单和政策检索的调查步骤。
     plan: InvestigationPlan | None = None
     # 当前步骤产生的订单或政策工具调用事件。
@@ -179,8 +201,14 @@ class OrderStateUpdate(StrictModel):
     question: str = ""
     # 政策依据不足时用于正式条款补查的查询文本。
     retry_query: str | None = None
-    # 政策补查前保留的检索结果，用于与补查结果一起核验证据。
+    # 本轮成功的检索回执，第一项确定本轮目录修订。
     policy_results: list[PolicySearchResult] = Field(default_factory=list)
+    # 仅明确办理且本轮订单已绑定时存在，换轮重置。
+    refund_authorization: AuthorizedRefundIntent | None = None
+    # 已确认持久保存的政策核验事件，提交前还须核对属于当前活跃轮次。
+    refund_verification: RefundPolicyVerification | None = None
+    # 固定退款节点获得的业务回执或阻断原因。
+    refund_result: RefundResult | None = None
 
 
 # 将本轮输入与已合并的调查状态提供给图节点，持久化时沿用字典和字符串枚举。

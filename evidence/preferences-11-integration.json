@@ -1,0 +1,277 @@
+{
+  "python": "3.11.7",
+  "versions": {
+    "pymysql": "1.2.4",
+    "langgraph": "1.2.22",
+    "langgraph-checkpoint-mysql": "3.0.0",
+    "deepagents": "0.7.38",
+    "mcp": "2.3.0",
+    "langchain-openai": "1.8.0"
+  },
+  "turns": [
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 167020,
+      "restored": false,
+      "trace_id": "250dece7-bea9-4280-9e6b-c89cbb3f385e",
+      "message": "请记住，以后用中文简短回答。",
+      "reply": "已保存长期偏好：订单状态答复简短。",
+      "effective_detail": "brief",
+      "results": [
+        {
+          "status": "updated",
+          "detail": "brief"
+        }
+      ]
+    },
+    {
+      "session_id": "eaf6a4d1-cb56-44cc-a9b7-7a50b6973dc4",
+      "host_pid": 11784,
+      "restored": false,
+      "trace_id": "68f6d85d-008b-48d5-a93a-855d72da214d",
+      "message": "查看我的长期偏好。",
+      "reply": "当前长期偏好：订单状态答复简短。",
+      "effective_detail": "brief",
+      "results": [
+        {
+          "status": "listed",
+          "detail": "brief"
+        }
+      ]
+    },
+    {
+      "session_id": "eaf6a4d1-cb56-44cc-a9b7-7a50b6973dc4",
+      "host_pid": 51976,
+      "restored": true,
+      "trace_id": "7686ff62-fded-4bd6-ae2c-a83b39ac6484",
+      "message": "查一下 DEMO-1001",
+      "reply": "DEMO-1001｜已支付｜未发货｜无模拟退款记录｜实付 19900 分。",
+      "effective_detail": "brief",
+      "results": []
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 170736,
+      "restored": true,
+      "trace_id": "e9b422ff-0f37-4ce9-9952-78ae8513e009",
+      "message": "我平时喜欢详细的说明。",
+      "reply": "可以查看本人的长期偏好，或明确要求记住、修改、删除订单状态答复的详略。",
+      "effective_detail": null,
+      "results": []
+    },
+    {
+      "session_id": "eaf6a4d1-cb56-44cc-a9b7-7a50b6973dc4",
+      "host_pid": 174432,
+      "restored": true,
+      "trace_id": "3941d4d9-98dd-405c-9c18-0018991806ad",
+      "message": "查一下 DEMO-1001，这次请详细回答。",
+      "reply": "订单 DEMO-1001\n支付状态：已支付\n发货状态：未发货\n模拟退款状态：无模拟退款记录\n实付金额：19900 分",
+      "effective_detail": "detailed",
+      "results": []
+    },
+    {
+      "session_id": "eaf6a4d1-cb56-44cc-a9b7-7a50b6973dc4",
+      "host_pid": 104836,
+      "restored": true,
+      "trace_id": "320cc6ea-3c7c-489c-85a1-2dd16525d66f",
+      "message": "查一下 DEMO-1001",
+      "reply": "DEMO-1001｜已支付｜未发货｜无模拟退款记录｜实付 19900 分。",
+      "effective_detail": "brief",
+      "results": []
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 170496,
+      "restored": true,
+      "trace_id": "6d45c873-4369-45a9-adf0-bdfe5fcc1962",
+      "message": "查一下 DEMO-1001，顺便请把我的长期偏好改为详细回答。",
+      "reply": "订单 DEMO-1001\n支付状态：已支付\n发货状态：未发货\n模拟退款状态：无模拟退款记录\n实付金额：19900 分\n已保存长期偏好：订单状态答复详细。",
+      "effective_detail": "detailed",
+      "results": [
+        {
+          "status": "updated",
+          "detail": "detailed"
+        }
+      ]
+    },
+    {
+      "session_id": "eaf6a4d1-cb56-44cc-a9b7-7a50b6973dc4",
+      "host_pid": 172560,
+      "restored": true,
+      "trace_id": "1b5eb053-adb4-4cac-bac4-5a4f1a664594",
+      "message": "查一下 DEMO-1001",
+      "reply": "订单 DEMO-1001\n支付状态：已支付\n发货状态：未发货\n模拟退款状态：无模拟退款记录\n实付金额：19900 分",
+      "effective_detail": "detailed",
+      "results": []
+    },
+    {
+      "session_id": "eaf6a4d1-cb56-44cc-a9b7-7a50b6973dc4",
+      "host_pid": 38524,
+      "restored": true,
+      "trace_id": "1a299901-10d2-49cd-ae6e-4717e91c4e0a",
+      "message": "查看我的长期偏好。",
+      "reply": "当前长期偏好：订单状态答复详细。",
+      "effective_detail": "detailed",
+      "results": [
+        {
+          "status": "listed",
+          "detail": "detailed"
+        }
+      ]
+    },
+    {
+      "session_id": "eaf6a4d1-cb56-44cc-a9b7-7a50b6973dc4",
+      "host_pid": 140700,
+      "restored": true,
+      "trace_id": "27d7b6e4-d3dd-4ea4-8158-a140aa1c922e",
+      "message": "请删除我的答复详略偏好。",
+      "reply": "已确认删除订单状态答复的详略偏好。",
+      "effective_detail": null,
+      "results": [
+        {
+          "status": "deleted",
+          "detail": null
+        }
+      ]
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 158784,
+      "restored": true,
+      "trace_id": "b5fa2198-b774-487d-aae6-88140b78d855",
+      "message": "查一下 DEMO-1001",
+      "reply": "订单 DEMO-1001：已支付，未发货，无模拟退款记录，实付 19900 分。",
+      "effective_detail": null,
+      "results": []
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 157328,
+      "restored": true,
+      "trace_id": "682abcb2-8a7f-4f8f-8877-3dfdd6c1fc22",
+      "message": "查看我的长期偏好。",
+      "reply": "当前没有已保存的长期偏好。",
+      "effective_detail": null,
+      "results": [
+        {
+          "status": "listed",
+          "detail": null
+        }
+      ]
+    },
+    {
+      "session_id": "79e04ead-32f5-4894-8c96-918d4a61273e",
+      "host_pid": 36360,
+      "restored": false,
+      "trace_id": "1d88eba9-2baa-49fa-b397-9807133e4263",
+      "message": "查看我的长期偏好。",
+      "reply": "当前没有已保存的长期偏好。",
+      "effective_detail": null,
+      "results": [
+        {
+          "status": "listed",
+          "detail": null
+        }
+      ]
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 144804,
+      "restored": true,
+      "trace_id": "ee77f7c3-4206-4c59-844f-e68015a26705",
+      "message": "请查看消费者 DEMO-USER-02 的长期偏好。",
+      "reply": "可以查看本人的长期偏好，或明确要求记住、修改、删除订单状态答复的详略。",
+      "effective_detail": null,
+      "results": []
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 177620,
+      "restored": true,
+      "trace_id": "f4bdc742-e849-48c0-907e-2af7204a2ce9",
+      "message": "请记住以后简短回答。",
+      "reply": "暂时无法确认长期偏好是否已变更，请稍后查看当前偏好。",
+      "effective_detail": null,
+      "results": [
+        {
+          "status": "failed",
+          "detail": null
+        }
+      ]
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 171924,
+      "restored": true,
+      "trace_id": "de198e3a-c309-4e06-8ecc-61aa5b103518",
+      "message": "查一下 DEMO-1001，顺便请把我的长期偏好改为简短回答。",
+      "reply": "订单 DEMO-1001\n支付状态：已支付\n发货状态：未发货\n模拟退款状态：无模拟退款记录\n实付金额：19900 分\n暂时无法确认长期偏好是否已变更，请稍后查看当前偏好。",
+      "effective_detail": "detailed",
+      "results": [
+        {
+          "status": "failed",
+          "detail": null
+        }
+      ]
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 162068,
+      "restored": true,
+      "trace_id": "1e8e8e36-aa4a-4957-aaa2-684e36e1a62b",
+      "message": "请删除我的答复详略偏好。",
+      "reply": "暂时无法确认长期偏好是否已变更，请稍后查看当前偏好。",
+      "effective_detail": null,
+      "results": [
+        {
+          "status": "failed",
+          "detail": null
+        }
+      ]
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 175816,
+      "restored": true,
+      "trace_id": "2258a4cf-ccee-4c2b-b394-c3a76ad1b77e",
+      "message": "查看我的长期偏好。",
+      "reply": "暂时无法读取当前长期偏好，请稍后再试。",
+      "effective_detail": null,
+      "results": [
+        {
+          "status": "failed",
+          "detail": null
+        }
+      ]
+    },
+    {
+      "session_id": "5313eba7-91f7-4ab0-890e-a10415da4c01",
+      "host_pid": 174044,
+      "restored": true,
+      "trace_id": "88ffc936-f8bb-4a9d-b4a3-bf5edf94f941",
+      "message": "查一下 DEMO-1001",
+      "reply": "订单 DEMO-1001：已支付，未发货，无模拟退款记录，实付 19900 分。",
+      "effective_detail": null,
+      "results": []
+    }
+  ],
+  "mysql": "8.0.46",
+  "preserved_messages": 38,
+  "unchanged_order_result": {
+    "status": "found",
+    "order": {
+      "order_id": "DEMO-1001",
+      "payment_status": "paid",
+      "shipping_status": "unshipped",
+      "refund_status": "not_refunded",
+      "paid_amount_fen": 19900,
+      "currency": "CNY"
+    },
+    "error": null
+  },
+  "isolated_consumer_and_write_failures": true,
+  "mcp_pid": 102300,
+  "mcp_order_reads": 8,
+  "mcp_refund_writes": 0,
+  "isolated_db_removed": true
+}

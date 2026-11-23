@@ -3,6 +3,12 @@
 from enum import StrEnum
 
 
+# 区分能携带退款授权的消费者原文和助手回复。
+class ConversationRole(StrEnum):
+    USER = "user"  # 消费者亲自发出的消息，可作为本次授权的依据。
+    ASSISTANT = "assistant"  # 演示助理发出的回复，无消费者授权效力。
+
+
 # 表示消费者本轮的业务意图。
 class ConversationIntent(StrEnum):
     ORDER_QUESTION = "order_question"  # 查询本人订单状态或咨询该订单能否退款。
@@ -51,3 +57,58 @@ class ObservationStatus(StrEnum):
 class DemoDataCommand(StrEnum):
     INIT = "init"  # 创建缺失的库、应用表和外键。
     SEED = "seed"  # 补齐演示订单和示例退款，保留现有业务记录。
+
+
+# 区分模拟退款执行及回执核对后的业务结果。
+class RefundOutcome(StrEnum):
+    SIMULATED_SUCCEEDED = "simulated_succeeded"  # 本次执行产生了真实的模拟业务记录。
+    ALREADY_REFUNDED = "already_refunded"  # 已有原单，直接返回既有业务记录。
+    DENIED = "denied"  # 业务条件未通过，未产生新退款。
+    FAILED = "failed"  # 明确没有成功写入，原因属于技术故障。
+    UNCONFIRMED = "unconfirmed"  # 当前无法确定结果，保留未决拦截。
+
+
+# 区分只读查询找到原单、暂未找到和无法查询。
+class RefundLookupStatus(StrEnum):
+    FOUND = "found"  # 已读取可信退款记录。
+    NOT_FOUND = "not_found"  # 当前未查到本人退款，不能据此认定未发送。
+    UNAVAILABLE = "unavailable"  # 业务存储或传输未能给出可信观察。
+
+
+# 标记提交记录对同订单后续办理的拦截和结果。
+class DispatchStatus(StrEnum):
+    PENDING = "pending"  # 已记录授权并等待一次执行或核对。
+    UNCONFIRMED = "unconfirmed"  # 已尝试发送但目前无法确定结果。
+    SUCCEEDED = "succeeded"  # 已关联可信的原模拟退款单。
+    CLOSED_NO_REFUND = "closed_no_refund"  # 已拒绝或已确认无退款并关闭。
+
+
+# 为拒绝、技术失败和未决结果记录可追踪的业务原因。
+class RefundReason(StrEnum):
+    UNAVAILABLE_ORDER = "unavailable_order"  # 本人没有可操作的该订单。
+    UNPAID = "unpaid"  # 订单未支付。
+    SHIPPED = "shipped"  # 订单已发货。
+    INVALID_DISPATCH = "invalid_dispatch"  # 请求缺少匹配的有效提交和授权。
+    POLICY_UNAVAILABLE = "policy_unavailable"  # 当前政策依据无法支持执行。
+    POLICY_NOT_SAVED = "policy_not_saved"  # 保存最终政策事件未得到确认。
+    DISPATCH_NOT_SAVED = "dispatch_not_saved"  # 保存本次提交未得到确认。
+    EXECUTION_UNAVAILABLE = "execution_unavailable"  # 执行通道未配置或确认无法使用。
+    DATABASE_FAILURE = "database_failure"  # 数据库明确没有提交退款。
+    RECEIPT_UNKNOWN = "receipt_unknown"  # 暂时无法确认已尝试的业务结果。
+
+
+# 区分预置模拟退款与实际执行创建的记录。
+class RefundSource(StrEnum):
+    SEED = "seed"  # 初始化时装载的模拟结果，未关联运行时提交。
+    EXECUTION = "execution"  # 由受控执行创建，关联实际幂等键。
+
+
+# 记录退款执行中特有的结构化事件。
+class RefundEvent(StrEnum):
+    POLICY_VERIFIED = "refund_policy_verified"  # 已保存最终政策依据。
+    DISPATCH_SAVED = "refund_dispatch_saved"  # 已确认本次带授权提交。
+    SUBMIT = "refund_submit"  # Host 开始唯一一次受控调用。
+    LOOKUP = "refund_lookup"  # 固定节点只读核对原退款。
+    RESULT = "refund_result"  # 业务结果已经确定或仍待核对。
+    STORE_FAILED = "refund_store_failed"  # 关键保存或结果状态回写失败。
+    REPLY_FAILED = "refund_reply_failed"  # 确定性模板展示发生故障。

@@ -2,6 +2,7 @@
 
 from typing import Protocol
 
+from model.policy.catalog import PolicyVersion
 from model.policy.search import PolicyEntry
 from model.policy.status import PolicySearchMode
 
@@ -15,7 +16,7 @@ class PolicySearchBackend(Protocol):
         # endregion
 
     # 按检索范围和查询向量召回当前版本的政策条目。
-    def recall(self, vector: list[float], mode: PolicySearchMode) -> list[PolicyEntry]:
+    def recall(self, vector: list[float], mode: PolicySearchMode, versions: list[PolicyVersion]) -> list[PolicyEntry]:
         # region 声明候选召回的查询范围和条目类型
         ...
         # endregion

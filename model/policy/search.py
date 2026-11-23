@@ -12,6 +12,8 @@ from model.policy.status import PolicyEntryType, PolicySearchMode, PolicySearchS
 # 检索文本及由 Host 指定的范围，供工具签名和请求模型使用。
 PolicyQueryText = Annotated[str, Field(strict=True, min_length=1, max_length=RefundLimits.MAX_POLICY_QUERY_CHARS)]
 PolicySearchScope = Annotated[PolicySearchMode, BeforeValidator(PolicySearchMode), status_schema(PolicySearchMode, 'Mode')]
+# 目录修订号由 MCP 分配，Host 在同一次调查的后续检索传回。
+PolicyCatalogRevision = Annotated[int, Field(strict=True, gt=0)]
 
 
 # 由文档、版本和条目编号生成稳定的政策条目主键。
@@ -35,6 +37,8 @@ class SearchPolicyRequest(BaseModel):
     query: PolicyQueryText
     # Host 指定的检索范围，可允许常见问题或只召回正式条款。
     mode: PolicySearchScope
+    # 首次检索省略，后续检索使用首次成功回执提供的修订号。
+    catalog_revision: PolicyCatalogRevision | None = None
 
 
 # 返回单条重排候选的政策来源和原文。
@@ -42,7 +46,7 @@ class PolicyCandidate(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     # 政策来源文档的稳定编号，用于核验候选和引用出自同一文档。
     document_id: str
-    # 来源文档的标题，用于核对发布源并标明引用出处。
+    # 来源文档的标题，用于在答复中标明引用出处。
     title: str
     # 候选条目所属的政策文档版本，用于核验条款仍属于当前发布版本。
     version: str
@@ -101,24 +105,25 @@ class PolicySearchResult(BaseModel):
     # 政策检索是否成功完成，供流程判断可否继续核验候选。
     status: Annotated[PolicySearchStatus, BeforeValidator(PolicySearchStatus), status_schema(PolicySearchStatus)]
     # 检索服务分配的事件编号，用于将政策引用追溯到实际检索和候选。
-    event_id: str
+    event_id: str = Field(min_length=1)
     # 按重排顺序返回的政策候选，检索失败或没有候选时为空列表。
     candidates: list[PolicyCandidate] = Field(max_length=PolicyLimits.MAX_RANKED_ENTRIES)
+    # 成功回执携带本次检索使用的修订号。旧 checkpoint 可缺少此字段。
+    catalog_revision: PolicyCatalogRevision | None = None
 
     # 将 SDK 接收的检索结果恢复为具名模型和业务枚举。
     @classmethod
     def from_mcp(cls, data: dict[str, Any]) -> Self:
-        # region 将 SDK 接收的检索结果恢复为具名模型和业务枚举
-        return cls.model_construct(
-            status=PolicySearchStatus(data['status']), event_id=data['event_id'],
-            candidates=[
-                PolicyCandidate.model_construct(
-                    document_id=item['document_id'], title=item['title'], version=item['version'],
-                    clause_id=item['clause_id'], entry_type=PolicyEntryType(item['entry_type']), text=item['text'],
-                )
-                for item in data['candidates']
-            ],
-        )
+        # region 校验 MCP 回执，成功结果必须携带可用于补查的修订号
+        result = cls.model_validate(data)
+        if (
+            # 本次检索已成功完成，候选列表可能为空。
+            result.status is PolicySearchStatus.OK
+            # 服务端未返回本轮所用的目录修订号。
+            and result.catalog_revision is None
+        ):
+            raise ValueError('成功检索缺少目录修订号')
+        return result
         # endregion
 
     # 检索失败时禁止将候选误认为可靠结果。
@@ -128,10 +133,15 @@ class PolicySearchResult(BaseModel):
         if (
             # 政策检索服务报告本轮失败。
             self.status is PolicySearchStatus.FAILED
-            # 失败回执仍携带了可能被当作有效结果的政策候选。
-            and self.candidates
+            # 失败回执仍携带候选或可能被视为已固定的目录修订号。
+            and (
+                # 失败回执仍携带了可能被当作有效结果的政策候选。
+                self.candidates
+                # 失败回执仍声明了目录修订号。
+                or self.catalog_revision is not None
+            )
         ):
-            raise ValueError('检索失败不得返回候选')
+            raise ValueError('检索失败不得返回候选或目录修订号')
         return self
         # endregion
 

@@ -9,7 +9,8 @@
     "url": "http://127.0.0.1:8765/mcp",
     "host": "127.0.0.1",
     "port": 8765,
-    "read_token": "请替换为至少32个ASCII字符的随机凭据"
+    "read_token": "请替换为至少32个ASCII字符的随机凭据",
+    "write_token": null
   },
   "qwen": {
     "base_url": "http://192.168.18.53:30080/qwen3/v1",
@@ -22,5 +23,6 @@
     "milvus_uri": "http://192.168.18.54:31953",
     "milvus_token": "请在本地填写",
     "model_base": "http://192.168.18.53:30080"
-  }
+  },
+  "refund_policy_events_dir": null
 }

@@ -8,9 +8,13 @@ from config import load_config
 from config.demo import CONSUMER_ID
 from implementations.refund.conversations import create_conversation, open_conversation
 from implementations.refund.decision import QwenDecider
+from implementations.refund.execution import RefundExecution
 from implementations.refund.investigation import execute_order
+from implementations.refund.preferences import MySQLPreferences, preference_reply
 from model.policy.status import PolicySearchMode
 from model.refund.flow import ExchangeMessage, InvestigationStep, OrderToolEvent, OrderTurn, PolicyStep, PolicyToolEvent
+from model.refund.submission import RefundTurnSource
+from model.refund.status import ConversationRole
 from utils.events import log_event
 from utils.qwen_client import create_qwen_client
 from workflows.refund import build_graph, load_refund_state, run_refund_turn
@@ -19,9 +23,11 @@ from workflows.refund import build_graph, load_refund_state, run_refund_turn
 # 载入或创建消费者会话，处理交互消息并保存原文与检查点。
 def run_cli(args, pool, saver, http: httpx.Client) -> int:
     # region 创建模型客户端并确定会话编号
-    model = create_qwen_client(load_config().qwen, http_client=http)
+    settings = load_config()
+    model = create_qwen_client(settings.qwen, http_client=http)
     session_id = args.session or create_conversation(pool, CONSUMER_ID)
     trace_id: str | None = None
+    live_trace: str | None = None
     # endregion
 
     # region 绑定调查和日志回调并构建退款流程
@@ -45,7 +51,15 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
         return event if isinstance(event, PolicyToolEvent) else None
         # endregion
 
-    graph = build_graph(QwenDecider(model, emit), investigate, emit, saver, search=search)
+    # 核对发送节点所属的轮次确实来自当前进程正在处理的新用户输入。
+    def is_live(candidate_trace: str) -> bool:
+        # region 与当前调用关联，恢复 checkpoint 时不把历史追踪标识当作授权
+        return candidate_trace == live_trace
+        # endregion
+
+    graph = build_graph(QwenDecider(model, emit), investigate, emit, saver, search=search,
+                        refund=RefundExecution(pool, settings, emit), is_live=is_live,
+                        preferences=MySQLPreferences(pool, CONSUMER_ID))
     # endregion
     # region 校验会话归属，恢复历史和检查点并显示会话编号
     with open_conversation(pool, session_id, CONSUMER_ID) as conversation:
@@ -76,12 +90,24 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
             # region 收到非空消息时保存原文、运行调查并记录和展示回复
             with open_conversation(pool, session_id, CONSUMER_ID) as conversation:
                 trace_id = str(uuid4())
-                conversation.append(ExchangeMessage(role="user", content=message))
-                turn = OrderTurn(history=conversation.history(), trace_id=trace_id)
-                state = run_refund_turn(graph, session_id, turn)
+                sequence = conversation.append(ExchangeMessage(role=ConversationRole.USER, content=message))
+                turn = OrderTurn(history=conversation.history(), trace_id=trace_id, refund_source=RefundTurnSource(
+                    consumer_id=CONSUMER_ID, session_id=session_id, source_message_sequence=sequence,
+                ))
+                live_trace = trace_id
+                try:
+                    state = run_refund_turn(graph, session_id, turn)
+                finally:
+                    live_trace = None
                 reply = state.reply
+                if state.preference_result is not None:
+                    # region 合并业务答复和独立的真实偏好操作结果
+                    assert state.decision is not None and state.decision.memory_request is not None
+                    outcome = preference_reply(state.decision.memory_request, state.preference_result)
+                    reply = f"{reply}\n{outcome}" if reply else outcome
+                    # endregion
                 assert isinstance(reply, str)
-                conversation.append(ExchangeMessage(role="assistant", content=reply))
+                conversation.append(ExchangeMessage(role=ConversationRole.ASSISTANT, content=reply))
             emit("turn_completed")
             print(reply, flush=True)
             # endregion

@@ -46,3 +46,5 @@
 - `python -m pytest order-demo/test -q --tb=short` 50 项通过。mypy、compileall、pip check 通过。全仓 pytest 仍因同名模块冲突和 SQLite checkpoint 依赖缺失等报 12 项收集错误。详细命令、版本、事件和观察见 [06 验收记录](../../../evidence/policy-06.md)。
 
 验收结论：**本票四项验收均通过**。Status 保持 `ready-for-agent`，仓库未配置完成状态。当前 Git HEAD 缺少 05 的政策模块与配置目录迁移，本票依赖工作区中的这些已有改动，实施结果保留在工作区。
+
+2026-11-23，05 和 06 的实现已纳入当前仓库。用户确认在继续办理退款前，由 [15](15-remove-host-policy-file-dependency.md) 将咨询答复及引用核验改为依据本轮 MCP 回执，再由 [16](16-publish-policy-catalog-revisions.md) 实现多文档版本切换，随后开始 [07](07-submit-one-mock-refund.md)。

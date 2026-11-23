@@ -7,8 +7,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from openai import OpenAIError
 
+from implementations.refund.execution import RefundExecution
 from interfaces.refund.decision import Decide
+from interfaces.refund.preference import ManagePreferences
 from model.refund.flow import OrderFlowNode, OrderState, OrderTurn
+from model.refund.status import ConversationIntent, OrderGoal
 from utils.checkpoint import thread_config
 from workflows.refund_nodes import InvestigateOrder, SearchPolicy, create_investigation_nodes, investigation_failure
 
@@ -23,9 +26,12 @@ def build_graph(
     checkpointer: BaseCheckpointSaver | None = None,
     *,
     search: SearchPolicy,
+    refund: RefundExecution | None = None,
+    is_live: Callable[[str], bool] | None = None,
+    preferences: ManagePreferences | None = None,
 ) -> RefundGraph:
     # region 创建退款调查节点和流程图
-    nodes = create_investigation_nodes(decide, investigate, emit, search)
+    nodes = create_investigation_nodes(decide, investigate, emit, search, refund, is_live, preferences)
     graph = StateGraph(OrderState, input_schema=OrderTurn)
     # endregion
 
@@ -66,11 +72,96 @@ def build_graph(
     # endregion
     # region 连接意图识别、调查执行和重规划节点
     graph.add_edge(START, OrderFlowNode.INTENT.value)
-    connect_or_finish(OrderFlowNode.INTENT, OrderFlowNode.PLAN)
+    # 按显式命令和订单答复需要，进入偏好节点或直接继续调查。
+    def after_intent(state: OrderState) -> str:
+        # region 显式偏好命令独立于业务答复执行
+        decision = state.decision
+        if decision is None:
+            return END
+        if decision.memory_request is not None:
+            return OrderFlowNode.PREFERENCES.value
+        # endregion
+
+        # region 无显式命令时，仅在准备订单状态答复时获取详略
+        if state.reply is not None:
+            return END
+        if (
+            # 本轮查询订单状态。
+            decision.intent is ConversationIntent.ORDER_QUESTION
+            # 退款资格咨询不使用订单状态排版。
+            and decision.order_goal is not OrderGoal.ELIGIBILITY
+            # 当前订单答复需要准备表达方式。
+            and (
+                # 已配置长期偏好持久化。
+                preferences is not None
+                # 或已识别当前消费者的临时要求。
+                or decision.temporary_detail is not None
+            )
+        ):
+            return OrderFlowNode.PREFERENCES.value
+        return OrderFlowNode.PLAN.value
+        # endregion
+
+    # 偏好命令可单独完成，也可与任何业务答复在同轮返回。
+    def after_preferences(state: OrderState) -> str:
+        # region 纯偏好命令和已有答复的路径到达终点，其他路径继续调查
+        assert state.decision is not None
+        if (
+            # 意图已产生直接业务答复。
+            state.reply is not None
+            # 本轮只管理长期偏好。
+            or state.decision.intent is ConversationIntent.MEMORY_REQUEST
+        ):
+            return END
+        return OrderFlowNode.PLAN.value
+        # endregion
+
+    graph.add_conditional_edges(OrderFlowNode.INTENT.value, after_intent, [
+        END, OrderFlowNode.PREFERENCES.value, OrderFlowNode.PLAN.value,
+    ])
+    graph.add_conditional_edges(OrderFlowNode.PREFERENCES.value, after_preferences, [END, OrderFlowNode.PLAN.value])
     connect_or_finish(OrderFlowNode.PLAN, OrderFlowNode.EXECUTE)
     graph.add_edge(OrderFlowNode.EXECUTE.value, OrderFlowNode.OBSERVE.value)
     connect_or_finish(OrderFlowNode.OBSERVE, OrderFlowNode.REPLAN)
-    connect_or_finish(OrderFlowNode.REPLAN, OrderFlowNode.EXECUTE)
+    # 按本轮是否已有答复、正式依据或真实退款结果决定调查后去向。
+    def after_investigation(state: OrderState) -> str:
+        # region 优先结束已答复或已有退款结果的本轮
+        if state.reply is not None:
+            return END
+        if state.refund_result is not None:
+            return OrderFlowNode.REFUND_REPLY.value
+        # endregion
+        # region 已取得本轮正式依据的办理进入固定复核，其余继续调查
+        if (
+            # 当前是明确办理路径。
+            state.refund_authorization is not None
+            # 当前步骤已经核验过实际工具结果。
+            and state.observation is not None
+            # 已结束正式政策检索并取得可用依据。
+            and state.observation.policy_evidence is not None
+            # 政策依据足以继续业务复核。
+            and state.observation.policy_evidence.citations
+        ):
+            return OrderFlowNode.REVIEW_REFUND.value
+        return OrderFlowNode.EXECUTE.value
+        # endregion
+
+    # 固定复核结束后只可能进入发送或确定性回复。
+    def after_review(state: OrderState) -> str:
+        # region 只允许已确认政策事件进入固定发送
+        if state.reply is not None:
+            return END
+        return OrderFlowNode.SEND_REFUND.value if state.refund_verification else OrderFlowNode.REFUND_REPLY.value
+        # endregion
+
+    graph.add_conditional_edges(OrderFlowNode.REPLAN.value, after_investigation, [
+        END, OrderFlowNode.EXECUTE.value, OrderFlowNode.REVIEW_REFUND.value, OrderFlowNode.REFUND_REPLY.value,
+    ])
+    graph.add_conditional_edges(OrderFlowNode.REVIEW_REFUND.value, after_review, [
+        END, OrderFlowNode.SEND_REFUND.value, OrderFlowNode.REFUND_REPLY.value,
+    ])
+    graph.add_edge(OrderFlowNode.SEND_REFUND.value, OrderFlowNode.REFUND_REPLY.value)
+    graph.add_edge(OrderFlowNode.REFUND_REPLY.value, END)
     # endregion
     # region 使用指定的检查点存储编译流程图
     return graph.compile(checkpointer=checkpointer)
@@ -89,6 +180,6 @@ def load_refund_state(graph: RefundGraph, session_id: str) -> tuple[OrderState |
 # 在指定会话的图线程执行本轮输入，返回已校验的完整状态。
 def run_refund_turn(graph: RefundGraph, session_id: str, turn: OrderTurn) -> OrderState:
     # region 在指定会话的图线程执行本轮输入，返回已校验的完整状态
-    result = graph.invoke(turn.model_dump(mode="json"), thread_config(session_id))
+    result = graph.invoke(turn, thread_config(session_id))
     return OrderState.model_validate(result)
     # endregion

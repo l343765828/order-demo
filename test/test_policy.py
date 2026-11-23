@@ -3,7 +3,9 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from implementations.policy.source import parse_policy, validate_policy_source
+from config.limits import PolicyLimits
+from implementations.policy.source import parse_policy, read_policy_document
+from model.policy.catalog import PolicySnapshot, PolicyVersion
 from model.policy.status import PolicySearchMode, PolicySearchStatus
 from utils.vectors import normalize_vector
 
@@ -55,14 +57,17 @@ class SearchTests(unittest.TestCase):
 
         class FailedBackend:
             def embed(self, text): return [1.0] + [0.0] * 1023
-            def recall(self, vector, mode): return [candidate]
+            def recall(self, vector, mode, versions): return [candidate]
             def rerank(self, query, candidates): raise TimeoutError()
-        result = search_policy('退款', PolicySearchMode.FORMAL, FailedBackend())
+        class Catalog:
+            def snapshot(self, revision):
+                return PolicySnapshot(revision=1, versions=[PolicyVersion(document_id=candidate.document_id, version=candidate.version)])
+        result = search_policy('退款', PolicySearchMode.FORMAL, FailedBackend(), catalog=Catalog())
         self.assertIs(result.status, PolicySearchStatus.FAILED)
         self.assertEqual(result.candidates, [])
 
     def test_milvus_recall_returns_typed_entries_without_vectors(self):
-        from mcp_service.policy.backend import PolicyBackend
+        from implementations.policy.backend import PolicyBackend
         from model.policy.search import PolicyEntry
 
         row = {'chunk_id': parse_policy('## RF-001 — 标题\n\n正文')[0].chunk_id, 'document_id':'DEMO-REFUND-POLICY', 'title':'政策',
@@ -72,19 +77,21 @@ class SearchTests(unittest.TestCase):
                 return [[{'entity': row}]]
         backend = PolicyBackend.__new__(PolicyBackend)
         backend.client = Client()
-        entry = backend.recall([1.0] + [0.0] * 1023, PolicySearchMode.FORMAL)[0]
+        backend.collection = PolicyLimits.MILVUS_COLLECTION_NAME
+        version = PolicyVersion(document_id=row['document_id'], version=row['version'])
+        entry = backend.recall([1.0] + [0.0] * 1023, PolicySearchMode.FORMAL, [version])[0]
         self.assertIsInstance(entry, PolicyEntry)
         self.assertEqual(entry.clause_id, 'RF-001')
 
     def test_publish_writes_complete_record(self):
-        from mcp_service.policy.backend import PolicyBackend
+        from implementations.policy.backend import PolicyBackend
 
         class Client:
             def upsert(self, collection, rows, **kwargs): self.rows = rows
             def flush(self, *args, **kwargs): pass
         backend = PolicyBackend.__new__(PolicyBackend)
         backend.client = Client()
-        backend.create_collection = lambda: None
+        backend.collection = PolicyLimits.MILVUS_COLLECTION_NAME
         backend.embed = lambda text: [1.0] + [0.0] * 1023
         entry = parse_policy('## RF-001 — 标题\n\n正文')[0]
         backend.publish([entry])
@@ -110,7 +117,7 @@ class ResultTests(unittest.TestCase):
 
     def test_rejects_source_header_mismatch(self):
         source = POLICY_SOURCE.read_text(encoding='utf-8')
-        with self.assertRaises(ValueError): validate_policy_source(source.replace('版本：1.0', '版本：2.0'))
+        with self.assertRaises(ValueError): read_policy_document(source.replace('版本：1.0', '版本：2.0'), version='1.0')
 
 class HostScopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_tool_cannot_override_formal_scope(self):

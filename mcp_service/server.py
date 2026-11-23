@@ -1,4 +1,4 @@
-"""独立 Streamable HTTP 只读订单服务。"""
+"""独立 Streamable HTTP 退款业务服务。"""
 
 import argparse
 from enum import StrEnum
@@ -13,18 +13,25 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from pydantic import ValidationError
 from starlette.datastructures import Headers
+from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
 from config import load_config
 from config.demo import CONSUMER_ID
+from config.limits import McpCorrelationField, PolicyLimits
+from implementations.policy.catalog import MySQLPolicyCatalog
+from implementations.refund.transactions import lookup_refund, submit_refund
 from mcp_service.orders.query import query_order
 from mcp_service.policy import search
 from model import create_pool
 from model.orders.query import GetOrderRequest, OrderQueryId
-from model.policy.search import PolicyQueryText, PolicySearchResult, PolicySearchScope
+from model.policy.search import PolicyCatalogRevision, PolicyQueryText, PolicySearchResult, PolicySearchScope
 from model.policy.status import PolicySearchStatus
 from model.refund.tool_name import McpToolName
+from model.refund.submission import (
+    GetRefundResultRequest, RefundIdentifier, RefundLookupResult, RefundResult, SubmitMockRefundRequest,
+)
 from utils.events import log_event
 
 
@@ -44,12 +51,15 @@ class _McpEvent(StrEnum):
     TOOL_REJECTED = "mcp_tool_rejected"  # 工具未注册或查单参数无效。
     GET_ORDER = "mcp_get_order"  # 查询本人订单后记录业务结果。
     SEARCH_POLICY = "mcp_search_policy"  # 政策检索结束后记录状态及检索事件标识。
+    GET_REFUND_RESULT = "mcp_get_refund_result"  # 固定节点核对本人订单的原退款。
+    SUBMIT_REFUND = "mcp_submit_mock_refund"  # 受控执行事务给出业务结果。
 
 
 # 区分工具拒绝事件的协议原因。
 class _RejectionReason(StrEnum):
     UNKNOWN_TOOL = "unknown_tool"  # 调用目标未在服务上注册。
     BAD_ARGUMENTS = "bad_arguments"  # 查单参数字段、类型或取值不符合契约。
+    WRITE_FORBIDDEN = "write_forbidden"  # 调查身份或缺少可信请求上下文。
 
 
 # 将工具日志与客户端追踪标识和 SDK 请求标识关联。
@@ -57,8 +67,9 @@ def _log_tool_event(event: _McpEvent, ctx: ServerRequestContext, **fields) -> No
     # region 将工具日志与客户端追踪标识和 SDK 请求标识关联
     meta = ctx.meta or {}
     log_event(
-        event.value, trace_id=_event_uuid(meta.get("trace_id")),
-        tool_event_id=_event_uuid(meta.get("tool_event_id")), mcp_request_id=ctx.request_id, **fields,
+        event.value, trace_id=_event_uuid(meta.get(McpCorrelationField.TRACE_ID.value)),
+        tool_event_id=_event_uuid(meta.get(McpCorrelationField.TOOL_EVENT_ID.value)),
+        mcp_request_id=ctx.request_id, **fields,
     )
     # endregion
 
@@ -85,8 +96,10 @@ class _OrderMcpServer(MCPServer):
             # region 按拒绝原因记录未知工具或无效查单参数并返回工具错误
             ctx = context.request_context
             match exc.__cause__:
-                case None:
+                case None if name != McpToolName.SUBMIT_MOCK_REFUND.value:
                     _log_tool_event(_McpEvent.TOOL_REJECTED, ctx, reason=_RejectionReason.UNKNOWN_TOOL.value)
+                case None:
+                    pass
                 case ValidationError() if name == McpToolName.GET_ORDER.value:
                     _log_tool_event(_McpEvent.TOOL_REJECTED, ctx, reason=_RejectionReason.BAD_ARGUMENTS.value)
                 case ValidationError():
@@ -98,11 +111,57 @@ class _OrderMcpServer(MCPServer):
         # endregion
 
 
-# 创建提供查单和政策检索的只读 MCP 应用，并绑定 HTTP 访问凭据。
-def make_app(pool, token: str):
+# 创建退款 MCP 应用，分别认证调查及受控执行凭据。
+def make_app(pool, token: str, write_token: str | None = None):
     # region 初始化 MCP 服务和只读工具注解
     server = _OrderMcpServer("order-demo")
     read_only = types.ToolAnnotations(read_only_hint=True)
+    expected = f"Bearer {token}".encode("ascii")
+    if write_token == token:
+        raise ValueError("调查和执行必须使用不同凭据")
+    expected_write = f"Bearer {write_token}".encode("ascii") if write_token else None
+    # endregion
+
+    # region 注册固定只读结果核对和受控退款写入
+    # 只读核对已有退款并关联调用和提交标识。
+    @server.tool(name=McpToolName.GET_REFUND_RESULT.value, description="核对本人订单的原模拟退款记录。",
+                 annotations=read_only)
+    def get_refund_result(
+        order_id: OrderQueryId, ctx: Context, idempotency_key: RefundIdentifier | None = None,
+    ) -> RefundLookupResult:
+        # region 读取真实原退款并记录关联事件
+        result = lookup_refund(pool, GetRefundResultRequest(order_id=order_id, idempotency_key=idempotency_key),
+                               CONSUMER_ID)
+        _log_tool_event(_McpEvent.GET_REFUND_RESULT, ctx.request_context,
+                        order_id=order_id, idempotency_key=idempotency_key, status=result.status.value)
+        return result
+        # endregion
+
+    # 校验传输层执行凭据，合格时按提交及订单事实完成退款事务。
+    @server.tool(name=McpToolName.SUBMIT_MOCK_REFUND.value, description="依据有效提交执行整单模拟退款。",
+                 annotations=types.ToolAnnotations(read_only_hint=False))
+    def submit_mock_refund(order_id: OrderQueryId, idempotency_key: RefundIdentifier, ctx: Context) -> RefundResult:
+        # region 调查身份或缺少执行身份时拒绝调用
+        context = ctx.request_context
+        if (
+            # 服务未配置受控执行身份。
+            expected_write is None
+            # 调用没有经过 HTTP 认证入口。
+            or not isinstance(context.request, Request)
+            # 调用未持有独立执行凭据。
+            or not compare_digest(context.request.headers.get("authorization", "").encode("latin-1"), expected_write)
+        ):
+            _log_tool_event(_McpEvent.TOOL_REJECTED, context, reason=_RejectionReason.WRITE_FORBIDDEN.value)
+            raise ToolError("退款执行身份不可用")
+        # endregion
+
+        # region 执行退款事务并记录结果供跨进程对账
+        result = submit_refund(pool, SubmitMockRefundRequest(order_id=order_id, idempotency_key=idempotency_key),
+                               CONSUMER_ID)
+        _log_tool_event(_McpEvent.SUBMIT_REFUND, context, order_id=order_id,
+                        idempotency_key=idempotency_key, status=result.status.value)
+        return result
+        # endregion
     # endregion
 
     # region 注册本人订单查询工具
@@ -119,20 +178,22 @@ def make_app(pool, token: str):
 
     # region 注册退款政策检索工具
     # 按 Host 指定的范围检索政策候选，并记录关联的检索事件。
-    @server.tool(name=McpToolName.SEARCH_POLICY.value, description="检索当前版本退款政策候选；范围由调用方控制。",
+    @server.tool(name=McpToolName.SEARCH_POLICY.value, description="检索指定目录修订内的退款政策候选；首次调用可省略修订号。",
                  annotations=read_only)
     def search_policy(
         query: PolicyQueryText, mode: PolicySearchScope, ctx: Context,
-    ) -> types.CallToolResult:
+        catalog_revision: PolicyCatalogRevision | None = None,
+    ) -> PolicySearchResult:
         # region 按指定范围检索政策并释放后端连接
-        from mcp_service.policy.backend import PolicyBackend
+        from implementations.policy.backend import open_policy_backend
 
         try:
-            backend = PolicyBackend()
-            try:
-                result = search.search_policy(query, mode, backend)
-            finally:
-                backend.close()
+            settings = load_config()
+            policy = settings.policy
+            database = policy.catalog_database if policy is not None else PolicyLimits.CATALOG_DATABASE
+            catalog = MySQLPolicyCatalog(database, settings.mysql)
+            with open_policy_backend() as backend:
+                result = search.search_policy(query, mode, backend, catalog=catalog, catalog_revision=catalog_revision)
         except Exception:
             # region 后端发生异常时生成失败结果和空候选
             result = PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=str(uuid4()), candidates=[])
@@ -141,8 +202,9 @@ def make_app(pool, token: str):
 
         # region 记录检索状态和事件编号并返回结构化结果
         _log_tool_event(_McpEvent.SEARCH_POLICY, ctx.request_context,
-                        status=result.status.value, policy_event_id=result.event_id)
-        return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
+                        status=result.status.value, policy_event_id=result.event_id, mode=mode.value,
+                        requested_catalog_revision=catalog_revision, catalog_revision=result.catalog_revision)
+        return result
         # endregion
     # endregion
 
@@ -151,8 +213,6 @@ def make_app(pool, token: str):
     # endregion
 
     # region 封装 HTTP 认证并返回 ASGI 应用
-    expected = f"Bearer {token}".encode("ascii")
-
     # 校验 HTTP 请求的 Bearer 凭据，放行后将 ASGI 事件交给 MCP 应用。
     async def authenticated(scope: Scope, receive: Receive, send: Send) -> None:
         # region Authorization 请求头缺失、重复或凭据不匹配时返回 401
@@ -162,7 +222,17 @@ def make_app(pool, token: str):
                 # HTTP 请求缺少 Authorization 请求头或重复提供了该请求头。
                 len(headers) != 1
                 # 唯一的 Authorization 请求头与服务要求的 Bearer 凭据不匹配。
-                or not compare_digest(headers[0].encode("latin-1"), expected)
+                or not (
+                    # 请求持有调查凭据。
+                    compare_digest(headers[0].encode("latin-1"), expected)
+                    # 请求持有已配置的执行凭据。
+                    or (
+                        # 服务已启用独立执行身份。
+                        expected_write is not None
+                        # 请求头与执行凭据完全匹配。
+                        and compare_digest(headers[0].encode("latin-1"), expected_write)
+                    )
+                )
             ):
                 log_event(_McpEvent.AUTH_REJECTED.value)
                 await Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
@@ -182,7 +252,7 @@ if __name__ == "__main__":
     mcp_config = load_config().mcp
     pool = create_pool()
     try:
-        uvicorn.run(make_app(pool, mcp_config.read_token), host=mcp_config.host,
+        uvicorn.run(make_app(pool, mcp_config.read_token, mcp_config.write_token), host=mcp_config.host,
                     port=mcp_config.port, access_log=False, log_level="warning")
     finally:
         pool.close()

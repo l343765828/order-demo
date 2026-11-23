@@ -1,15 +1,26 @@
 """政策向量服务和 Milvus 的独立发布、检索接入。"""
+from collections.abc import Iterator
+from contextlib import contextmanager
+import json
+
 import httpx
 from pymilvus import DataType, MilvusClient
 from config import load_config
 from config.limits import PolicyLimits
-from implementations.policy.source import DOCUMENT_ID, VERSION
 from interfaces.policy.search import PolicySearchBackend
+from model.policy.catalog import PolicyVersion
 from model.policy.search import PolicyEntry, PolicyVectorRecord
 from model.policy.status import PolicyEntryType, PolicySearchMode
 from utils.vectors import normalize_vector
 
 FIELDS = list(PolicyEntry.model_fields)
+
+
+# 生成只匹配一份文档特定版本的 Milvus 过滤式。
+def version_filter(target: PolicyVersion) -> str:
+    # region 用完整文档版本对限定检索或维护的索引范围
+    return f'(document_id == {json.dumps(target.document_id)} and version == {json.dumps(target.version)})'
+    # endregion
 
 
 # 连接固定政策集合及配置文件中的向量、重排服务。
@@ -22,6 +33,7 @@ class PolicyBackend(PolicySearchBackend):
             raise ValueError('配置文件缺少 policy 设置')
         self.client = MilvusClient(uri=policy.milvus_uri, token=policy.milvus_token, timeout=PolicyLimits.MILVUS_CONNECT_TIMEOUT_SECONDS)
         self.base = policy.model_base.rstrip('/')
+        self.collection = policy.milvus_collection
         # endregion
 
     # 关闭 Milvus 连接。
@@ -43,9 +55,9 @@ class PolicyBackend(PolicySearchBackend):
         return normalize_vector(values, expected_dimensions=PolicyLimits.VECTOR_DIMENSIONS)
         # endregion
 
-    # 在服务端按固定文档和当前版本过滤后召回最多八条。
-    def recall(self, vector: list[float], mode: PolicySearchMode) -> list[PolicyEntry]:
-        # region 固定当前文档版本，正式范围额外限定为正式条款，拒绝未知范围
+    # 在服务端按目录快照的文档版本组合预过滤，统一召回最多八条。
+    def recall(self, vector: list[float], mode: PolicySearchMode, versions: list[PolicyVersion]) -> list[PolicyEntry]:
+        # region 以目录中的完整文档版本对过滤，正式范围再限定条目类型
         match mode:
             case PolicySearchMode(value=PolicySearchMode.FORMAL.value):
                 entry_type_filter = f' and entry_type == "{PolicyEntryType.POLICY.value}"'
@@ -53,12 +65,14 @@ class PolicyBackend(PolicySearchBackend):
                 entry_type_filter = ''
             case _:
                 raise ValueError('无效检索范围')
-        expression = f'document_id == "{DOCUMENT_ID}" and version == "{VERSION}"{entry_type_filter}'
+        if not versions:
+            raise ValueError('政策版本快照为空')
+        expression = '(' + ' or '.join(version_filter(target) for target in versions) + ')' + entry_type_filter
         # endregion
 
         # region 按限定范围召回候选并核对条目契约
         results = self.client.search(
-            PolicyLimits.MILVUS_COLLECTION_NAME, data=[vector], anns_field='embedding', filter=expression,
+            self.collection, data=[vector], anns_field='embedding', filter=expression, consistency_level='Strong',
             limit=PolicyLimits.MAX_RECALLED_ENTRIES, output_fields=FIELDS,
             search_params={'metric_type': 'IP'}, timeout=PolicyLimits.MILVUS_SEARCH_TIMEOUT_SECONDS,
         )
@@ -91,8 +105,8 @@ class PolicyBackend(PolicySearchBackend):
     # 仅创建缺失的专用集合和固定索引；不删除已有集合。
     def create_collection(self):
         # region 已有政策集合时核对字段和索引，发现不兼容时停止发布
-        if self.client.has_collection(PolicyLimits.MILVUS_COLLECTION_NAME):
-            description = self.client.describe_collection(PolicyLimits.MILVUS_COLLECTION_NAME)
+        if self.client.has_collection(self.collection):
+            description = self.client.describe_collection(self.collection)
             fields = {field['name']: field for field in description['fields']}
             lengths = PolicyLimits.FIELD_BYTES
             if (
@@ -120,7 +134,7 @@ class PolicyBackend(PolicySearchBackend):
                 or fields['embedding']['params']['dim'] != PolicyLimits.VECTOR_DIMENSIONS
             ):
                 raise ValueError('现有政策集合结构不兼容')
-            index = self.client.describe_index(PolicyLimits.MILVUS_COLLECTION_NAME, 'embedding')
+            index = self.client.describe_index(self.collection, 'embedding')
             if (
                 # 政策向量索引未使用约定的 FLAT 类型。
                 index.get('index_type') != 'FLAT'
@@ -139,20 +153,71 @@ class PolicyBackend(PolicySearchBackend):
         indexes = self.client.prepare_index_params()
         indexes.add_index(field_name='embedding', index_type='FLAT', metric_type='IP')
         self.client.create_collection(
-            PolicyLimits.MILVUS_COLLECTION_NAME, schema=schema, index_params=indexes,
+            self.collection, schema=schema, index_params=indexes,
             timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS,
         )
         # endregion
 
-    # 只写入本演示政策条目，不触碰其他集合或历史版本。
+    # 写入调用方已取得发布许可的完整版本条目，并等待服务确认写入。
     def publish(self, entries: list[PolicyEntry]) -> None:
         # region 结合已校验的政策条目与已归一化的向量，按稳定主键写入专用集合
         records = [PolicyVectorRecord.model_construct(**entry.model_dump(), embedding=self.embed(entry.text))
                    for entry in entries]
-        self.create_collection()
         self.client.upsert(
-            PolicyLimits.MILVUS_COLLECTION_NAME, [record.model_dump(mode='json') for record in records],
+            self.collection, [record.model_dump(mode='json') for record in records],
             timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS,
         )
-        self.client.flush(PolicyLimits.MILVUS_COLLECTION_NAME, timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
+        self.client.flush(self.collection, timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
         # endregion
+
+    # 强一致检查此文档版本是否已有索引记录。
+    def has_entries(self, target: PolicyVersion) -> bool:
+        # region 只读取一个主键以核对文档版本是否为空
+        return bool(self.client.query(self.collection, filter=version_filter(target), output_fields=['chunk_id'],
+                                      limit=1, consistency_level='Strong',
+                                      timeout=PolicyLimits.MILVUS_SEARCH_TIMEOUT_SECONDS))
+        # endregion
+
+    # 清理从未生效的单一文档版本，并核对没有残留条目。
+    def clear_version(self, target: PolicyVersion) -> None:
+        # region 仅删除目标文档版本并等待删除确认
+        self.client.delete(self.collection, filter=version_filter(target),
+                           timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
+        self.client.flush(self.collection, timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
+        # endregion
+
+        # region 强一致查询确认残留已经清空
+        if self.has_entries(target):
+            raise ValueError('政策版本清理后仍有残留条目')
+        # endregion
+
+    # 强一致回读一个完整版本，逐条解析公开字段和已存储的向量。
+    def read_version(self, target: PolicyVersion) -> list[PolicyEntry]:
+        # region 遍历全部目标条目，验证存储字段和向量后返回可与原件比对的条目
+        iterator = self.client.query_iterator(
+            collection_name=self.collection, filter=version_filter(target), output_fields=[*FIELDS, 'embedding'],
+            batch_size=PolicyLimits.READBACK_BATCH_SIZE, consistency_level='Strong',
+            timeout=PolicyLimits.MILVUS_SEARCH_TIMEOUT_SECONDS,
+        )
+        try:
+            entries = []
+            while batch := iterator.next():
+                for row in batch:
+                    record = PolicyVectorRecord.model_validate(row)
+                    entries.append(PolicyEntry.model_construct(**record.model_dump(exclude={'embedding'})))
+            return entries
+        finally:
+            iterator.close()
+        # endregion
+
+
+# 在检索或发布需要使用 Milvus 时创建并释放后端连接。
+@contextmanager
+def open_policy_backend() -> Iterator[PolicyBackend]:
+    # region 创建政策后端并在使用结束后释放连接
+    backend = PolicyBackend()
+    try:
+        yield backend
+    finally:
+        backend.close()
+    # endregion

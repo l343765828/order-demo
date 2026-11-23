@@ -1,4 +1,4 @@
-"""消费者 CLI 通过独立 MCP 服务查单及咨询退款政策。"""
+"""消费者 CLI 通过独立 MCP 服务查单、咨询政策和办理模拟退款。"""
 
 import argparse
 import sys
@@ -7,6 +7,7 @@ from io import TextIOWrapper
 import httpx
 import pymysql
 
+from config import load_config
 from implementations.refund.conversations import SessionUnavailable
 from implementations.refund.host import run_cli
 from model import connection_config, create_pool
@@ -17,7 +18,7 @@ from utils.events import log_event
 # 解析命令行参数，初始化存储并运行会话；返回进程退出码。
 def main() -> int:
     # region 解析命令行参数并核对历史模式所需的会话编号
-    parser = argparse.ArgumentParser(description="演示订单查询和退款政策咨询")
+    parser = argparse.ArgumentParser(description="演示订单查询、退款政策咨询与模拟退款")
     parser.add_argument("--session", help="继续本人已有会话")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--message", help="发送一条消费者消息后退出")
@@ -35,7 +36,8 @@ def main() -> int:
 
     # region 按命令模式初始化检查点或运行会话并处理启动失败
     try:
-        with open_mysql_checkpointer("order_demo", **connection_config()) as saver:
+        mysql = load_config().mysql
+        with open_mysql_checkpointer(mysql.database, **connection_config(mysql)) as saver:
             # region 仅初始化检查点时创建所需表并退出
             if args.init_checkpoints:
                 saver.setup()

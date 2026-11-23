@@ -45,7 +45,7 @@ flowchart LR
 | MCP 工具 | 调用者 | 服务端工作 | 返回契约 |
 | --- | --- | --- | --- |
 | `get_order` | OrderAgent 的只读工具适配器；固定业务复核节点 | 按可信消费者身份查询 MySQL 订单 | `OrderQueryResult` |
-| `search_policy` | PolicyAgent 的只读工具适配器 | 调用 BGE-M3 编码 query，在 Milvus 召回候选并调用 BGE reranker 重排 | `PolicySearchResult`，再由 Host 核验并形成既有 `PolicyEvidence`。重排超时或失败时返回检索失败。 |
+| `search_policy` | PolicyAgent 的只读工具适配器 | 按目录修订和检索范围召回并重排候选，普通咨询允许 FAQ 与正式条款一起参与 | `PolicySearchResult`，包含候选来源及目录修订号。重排超时或失败时返回检索失败。 |
 | `get_refund_result` | 固定业务节点，处理已退款或回执不明 | 按消费者和订单核对原退款记录 | `RefundLookupResult` |
 | `submit_mock_refund` | 仅固定 LangGraph 退款节点 | MySQL 事务内复核并创建唯一模拟退款记录 | `RefundResult` |
 
@@ -53,7 +53,7 @@ flowchart LR
 
 用户已确认退款业务工具统一通过 MCP 调用。退款 Agent 直接使用 MySQL 管理聊天原文、摘要、偏好和 LangGraph 检查点。MCP Server 管理订单、退款记录和政策检索。两个服务引用 `order-demo/model/`，共享表定义和连接配置，并分别管理进程内的数据库连接。具体分工见[数据库表结构](database-design.md)。
 
-政策文档入库作为显式管理命令或一次性任务执行，写入本演示政策 collection，不开放为消费者对话工具；演示重置也只在管理入口提供，不开放给 ReAct。二者不构成第三个常驻服务。
+政策发布和演示重置通过显式管理入口运行。发布写入本演示政策 collection，确认可检索后更新 MySQL 政策发布目录。MCP 读取目录并按版本提供候选与正式条款，Host 根据本轮回执回答和核验引用。见 [ADR-0010](../../docs/adr/0010-refund-policy-publication-and-evidence.md)。
 
 ## 5. 读写权限与可信身份
 
@@ -72,8 +72,10 @@ Host 处理取消或换单时更新当前会话的办理意图。提交已保存
 工具输入输出使用具名数据模型生成 Schema，Host 和 Server 共享或严格对齐契约；在 MCP 边界完成解析与校验，不在后续内部逻辑反复处理任意字典。
 
 - `GetOrderRequest`：只包含受约束的订单号；消费者身份来自受认证上下文。
-- `SearchPolicyRequest`：政策查询文本；集合、向量维度和检索配置由服务端固定，不允许模型传任意数据库参数。
-- `PolicySearchResult`：检索状态、候选条款、文档 / 版本 / 条款 ID、原文及真实检索事件引用；不伪装成模型已经完成充分性判断。
+- `SearchPolicyRequest`：沿用 `query` 和 Host 控制的 `mode`，允许 Host 在后续读取时传回本轮目录修订号。首次读取由 MCP 选定版本，集合、向量维度和检索条件由服务端负责。
+- `PolicySearchResult`：沿用 `status`、`event_id` 和 `candidates`，成功时携带目录修订号，包括候选为空的情况。候选含文档 ID、标题、版本、条目编号、条目类型和原文。
+- 普通咨询的全部重排候选参与选答。选中已发布 FAQ 时直接使用其答案并引用该 FAQ，选中正式条款时使用条款原文及出处。首轮成功但没有适用候选时，Host 沿用同一目录修订再调用一次仅限正式条款的 `search_policy`。认证使用配置文件中的 `mcp.read_token`。
+- Host 按事件 ID、文档 ID、版本、条目编号和类型从本轮成功检索回执核验出处，取回执标题及原文。订单资格与退款办理采用正式条款作为政策依据。首次成功回执确定本轮政策版本快照，后续检索沿用该修订号。15 的 MCP 使用演示版本生成修订号，16 改用 MySQL 目录，沿用同一工具契约。
 - `GetRefundResultRequest`：订单号必填，Host 已知的业务标识可空，仅用于关联核对；新会话即使不知道旧幂等键也可以按本人订单读取原结果。`RefundLookupResult` 明确区分找到原结果、未找到和查询不可用；未找到不当然证明先前提交一定未发生。
 - `SubmitMockRefundRequest`：`order_id` 和由固定节点生成的 `idempotency_key`。Server 从经认证的上下文取得消费者身份，从提交记录核验本次授权，从订单读取实付金额。
 - `RefundResult`：沿用 simulated_succeeded / already_refunded / denied / failed / unconfirmed 语义，成功结果必须对应真实记录。
@@ -106,7 +108,7 @@ Host 处理取消或换单时更新当前会话的办理意图。提交已保存
 
 图运行期间必须处于有效 MCP Client 生命周期中，退出时按 SDK 约定关闭连接；Client、HTTP 连接和凭据不序列化进 LangGraph checkpoint。具体长连接或按调用建立连接的选择由锁定适配器决定，不能跨用户混用身份，也不能把 MCP 连接恢复当作消费者会话恢复。
 
-显式演示重置只作用于本演示 MySQL 数据及初始订单；保留政策 collection，政策更新单独入库。两个应用要共享一致的演示数据边界，具体命名空间与维护命令由实现者选择，不能在某一服务启动时自动执行清理。
+显式演示重置只作用于本演示会话及模拟业务数据，再装载初始订单。保留 MySQL 政策发布目录及 Milvus 政策 collection。两个应用共享相同的演示数据边界，由显式维护命令执行清理。
 
 重置期间暂停本演示的新业务请求，并先确认在途写操作已结束；无法确认时停止重置，不让旧请求在初始订单重新装载后补写旧结果。具体停流、事务或数据代际机制属于实现选择，不扩大消费者操作权限。
 

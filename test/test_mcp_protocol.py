@@ -14,7 +14,7 @@ from protocol_probe_contracts import EchoInput, EchoResult
 from verify_mcp_protocol import bind_echo, probe_process
 from config.demo import CONSUMER_ID
 from mcp_service import server
-from mcp_service.policy import backend
+from implementations.policy import backend
 from model.orders.query import GetOrderRequest, OrderDetails, OrderQueryResult
 from model.orders.status import OrderQueryStatus, PaymentStatus, RefundStatus, ShippingStatus
 from model.policy.search import PolicyCandidate, PolicySearchResult
@@ -139,12 +139,15 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
 
     policy_backend = Backend()
 
-    def search_policy(query, mode, connection):
+    def search_policy(query, mode, connection, *, catalog, catalog_revision):
         assert connection is policy_backend
-        calls.append((query, mode))
-        return PolicySearchResult(status=PolicySearchStatus.OK, event_id=policy_event, candidates=[candidate])
+        calls.append((query, mode, catalog_revision))
+        return PolicySearchResult(status=PolicySearchStatus.OK, event_id=policy_event, candidates=[candidate],
+                                  catalog_revision=catalog_revision)
 
     monkeypatch.setattr(server, "query_order", query_order)
+    monkeypatch.setattr(server, "load_config", lambda: type("Settings", (), {"policy": None, "mysql": None})())
+    monkeypatch.setattr(server, "MySQLPolicyCatalog", lambda database, mysql: object())
     monkeypatch.setattr(server.search, "search_policy", search_policy)
     monkeypatch.setattr(backend, "PolicyBackend", lambda: policy_backend)
     headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25"}
@@ -161,19 +164,31 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
         request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
                                "clientInfo": {"name": "test", "version": "1"}})
         tools = {tool["name"]: tool for tool in request("tools/list", {})["tools"]}
-        assert set(tools) == {"get_order", "search_policy"}
+        assert set(tools) == {"get_order", "search_policy", "get_refund_result", "submit_mock_refund"}
         assert set(tools["get_order"]["inputSchema"]["properties"]) == {"order_id"}
-        assert set(tools["search_policy"]["inputSchema"]["properties"]) == {"query", "mode"}
-        assert all(tool["annotations"]["readOnlyHint"] for tool in tools.values())
-        assert all("outputSchema" not in tool for tool in tools.values())
+        policy = tools["search_policy"]
+        assert set(policy["inputSchema"]["properties"]) == {"query", "mode", "catalog_revision"}
+        assert set(policy["inputSchema"]["required"]) == {"query", "mode"}
+        assert "catalog_revision" in policy["outputSchema"]["properties"]
+        assert {name for name, tool in tools.items() if tool["annotations"]["readOnlyHint"]} == {
+            "get_order", "search_policy", "get_refund_result",
+        }
+        assert set(tools["submit_mock_refund"]["inputSchema"]["properties"]) == {"order_id", "idempotency_key"}
+        assert set(tools["get_refund_result"]["inputSchema"]["properties"]) == {"order_id", "idempotency_key"}
+        assert "outputSchema" not in tools["get_order"]
 
         for name, arguments in (
             ("get_order", {"order_id": 1001}),
             ("get_order", {}),
             ("search_policy", {"query": "refund", "mode": "invalid"}),
+            ("search_policy", {"query": "refund", "mode": "formal", "catalog_revision": "7"}),
             ("unknown", {}),
         ):
             assert request("tools/call", {"name": name, "arguments": arguments}) == {"isError": True, "content": []}
+        rejected = request("tools/call", {"name": "submit_mock_refund", "arguments": {
+            "order_id": "DEMO-1001", "idempotency_key": "unauthorized",
+        }})
+        assert rejected["isError"] is True
         assert calls == []
 
         order = request("tools/call", {
@@ -183,19 +198,20 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
         }, request_id=2)
         policy = request("tools/call", {
             "name": "search_policy",
-            "arguments": {"query": "refund", "mode": "formal", "extra": True},
+            "arguments": {"query": "refund", "mode": "formal", "catalog_revision": 7, "extra": True},
         }, request_id=3)
         order_result = OrderQueryResult.from_mcp(order["structuredContent"])
         assert order_result.status is OrderQueryStatus.FOUND and order_result.order == details
         assert order_result.order.payment_status is PaymentStatus.PAID
         policy_result = PolicySearchResult.from_mcp(policy["structuredContent"])
         assert policy_result.event_id == policy_event and policy_result.candidates == [candidate]
+        assert policy_result.catalog_revision == 7
         assert policy_result.candidates[0].entry_type is PolicyEntryType.POLICY
 
-    assert calls == [(GetOrderRequest(order_id="DEMO-1001"), CONSUMER_ID), ("refund", PolicySearchMode.FORMAL), "closed"]
+    assert calls == [(GetOrderRequest(order_id="DEMO-1001"), CONSUMER_ID), ("refund", PolicySearchMode.FORMAL, 7), "closed"]
     events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")]
     assert [event["reason"] for event in events if event["event"] == "mcp_tool_rejected"] == [
-        "bad_arguments", "bad_arguments", "unknown_tool",
+        "bad_arguments", "bad_arguments", "unknown_tool", "write_forbidden",
     ]
     order_event, = [event for event in events if event["event"] == "mcp_get_order"]
     assert order_event["trace_id"] == trace and order_event["mcp_request_id"] == 2

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pymysql
 
+from config import load_config
 from config.demo import CONSUMER_ID
 from model import connection_config
 from model.orders.status import PaymentStatus, ShippingStatus
@@ -12,14 +13,16 @@ from model.refund.status import DemoDataCommand
 # 根据管理命令初始化应用表或装载演示种子。
 def manage_demo_data(command: DemoDataCommand) -> None:
     # region 使用独立数据库连接初始化演示库或装载种子数据
-    connection = pymysql.connect(**connection_config(), autocommit=True)
+    mysql = load_config().mysql
+    connection = pymysql.connect(**connection_config(mysql), autocommit=True)
     try:
         with connection.cursor() as cursor:
             match command:
                 # region init 补齐缺失的演示库、应用表和退款外键
                 case DemoDataCommand.INIT:
-                    cursor.execute("CREATE DATABASE IF NOT EXISTS order_demo CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
-                    cursor.execute("USE order_demo")
+                    database = mysql.database.replace("`", "``")
+                    cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
+                    connection.select_db(mysql.database)
                     for statement in (Path(__file__).resolve().parents[2] / "model" / "schema.sql").read_text(encoding="utf-8-sig").split(";"):
                         if statement.strip():
                             cursor.execute(statement)
@@ -30,7 +33,7 @@ def manage_demo_data(command: DemoDataCommand) -> None:
 
                 # region seed 保留已有订单，仅为本次新插入的指定订单写入种子退款
                 case DemoDataCommand.SEED:
-                    cursor.execute("USE order_demo")
+                    connection.select_db(mysql.database)
                     # 已有业务记录优先；重装种子不会覆盖订单或退款。
                     rows = [("DEMO-1001", CONSUMER_ID, PaymentStatus.PAID, ShippingStatus.UNSHIPPED, 19900),
                             ("DEMO-1002", CONSUMER_ID, PaymentStatus.UNPAID, ShippingStatus.UNSHIPPED, 0),

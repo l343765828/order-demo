@@ -9,9 +9,19 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import RequestParamsMeta
 from pydantic import BaseModel
-from config.limits import ConnectionLimits
+from config.limits import ConnectionLimits, McpCorrelationField
 
 Result = TypeVar("Result", bound=BaseModel)
+
+
+# 生成供 MCP 客户端传递的追踪和单次工具事件标识。
+def mcp_correlation_meta(trace_id: str, tool_event_id: str) -> RequestParamsMeta:
+    # region 按协议字段名称组装扩展元数据
+    return cast(RequestParamsMeta, {
+        McpCorrelationField.TRACE_ID.value: trace_id,
+        McpCorrelationField.TOOL_EVENT_ID.value: tool_event_id,
+    })
+    # endregion
 
 
 # 创建禁止自动重定向的 MCP HTTP 客户端，由调用方负责关闭。

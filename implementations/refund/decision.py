@@ -5,6 +5,7 @@ from typing import cast
 
 from interfaces.refund.decision import Decide, Decision
 from model.policy.evidence import PolicySelection
+from model.refund.flow import BusinessConversationDecision, ConversationDecision
 from utils.qwen_client import QwenChatOpenAI
 
 
@@ -19,6 +20,16 @@ class QwenDecider(Decide):
 
     # 使用指定模型类约束输出，将政策选择写入当前请求的事件日志。
     def __call__(self, schema: type[Decision], prompt: str, /) -> Decision:
+        # region 业务意图沿用原有模型 Schema，固定偏好命令由应用节点组装
+        if schema is ConversationDecision:
+            business = cast(BusinessConversationDecision, self.model.with_structured_output(
+                BusinessConversationDecision, method="json_schema", strict=True,
+            ).invoke(prompt))
+            return cast(Decision, ConversationDecision(
+                intent=business.intent, order_id=business.order_id, order_goal=business.order_goal,
+            ))
+        # endregion
+
         # region 使用指定模型类约束输出，将政策选择写入当前请求的事件日志
         decision = cast(Decision, self.model.with_structured_output(schema, method="json_schema", strict=True).invoke(prompt))
         if isinstance(decision, PolicySelection):

@@ -15,12 +15,11 @@ from langchain.tools import ToolRuntime
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
-from mcp.types import RequestParamsMeta
 from pydantic import ValidationError
 
 from config import load_config
 from config.limits import ConnectionLimits
-from utils.mcp_client import bind_mcp_tool, open_mcp_client
+from utils.mcp_client import bind_mcp_tool, mcp_correlation_meta, open_mcp_client
 from model.refund.flow import InvestigationStep, OrderToolEvent, PolicyStep, PolicyToolEvent
 from model.policy.search import PolicyQuery, PolicySearchResult, SearchPolicyRequest
 from model.orders.query import GetOrderRequest, OrderQueryResult
@@ -271,10 +270,10 @@ def execute_order(
                 # 绑定 Host 选择的范围并关联服务端检索事件。
                 async def fetch_policy(request: PolicyQuery, event_id: str) -> PolicySearchResult:
                     # region 绑定 Host 选择的范围并关联服务端检索事件
-                    return await policy_tool.call(SearchPolicyRequest.model_construct(query=request.query, mode=mode),
-                        timeout=ConnectionLimits.POLICY_CALL_SECONDS, meta=cast(RequestParamsMeta, {
-                            "trace_id": trace_id, "tool_event_id": event_id,
-                        }))
+                    return await policy_tool.call(SearchPolicyRequest.model_construct(
+                        query=request.query, mode=mode, catalog_revision=step.catalog_revision,
+                    ),
+                        timeout=ConnectionLimits.POLICY_CALL_SECONDS, meta=mcp_correlation_meta(trace_id, event_id))
                     # endregion
 
                 return await investigate_order(create_qwen_client(load_config().qwen, http_async_client=http), step, trace_id, fetch_policy, emit)
@@ -288,7 +287,7 @@ def execute_order(
                 # region 携带追踪和工具事件标识，调用 MCP 查单并返回结构化结果
                 return await bound.call(
                     request, timeout=ConnectionLimits.ORDER_CALL_SECONDS,
-                    meta=cast(RequestParamsMeta, {"trace_id": trace_id, "tool_event_id": event_id}),
+                    meta=mcp_correlation_meta(trace_id, event_id),
                 )
                 # endregion
 

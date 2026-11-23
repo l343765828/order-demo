@@ -3,11 +3,11 @@
 ## 项目文档
 
 - [需求与总体设计](.scratch/refund-agent-all-tech-demo/spec.md)涵盖业务范围、流程、异常处理和验收标准。
-- [施工总览](.scratch/refund-agent-all-tech-demo/task-overview.md)列出 14 份工单、施工顺序、依赖和各项验收目标。[模型接口实施计划](.scratch/refund-agent-all-tech-demo/interface-implementation-plan.md)记录 Qwen 原生工具与 Schema 接口的实施步骤。
+- [施工总览](.scratch/refund-agent-all-tech-demo/task-overview.md)列出各工单、施工顺序、依赖和验收目标。[模型接口实施计划](.scratch/refund-agent-all-tech-demo/interface-implementation-plan.md)记录 Qwen 原生工具与 Schema 接口的实施步骤。
 - 专题设计包括[数据库](.scratch/refund-agent-all-tech-demo/database-design.md)、[存储与记忆](.scratch/refund-agent-all-tech-demo/storage-memory.md)、[上下文压缩](.scratch/refund-agent-all-tech-demo/context-compression.md)、[MCP 接入与部署](.scratch/refund-agent-all-tech-demo/mcp-integration.md)、[模型选型](.scratch/refund-agent-all-tech-demo/model-selection.md)、[接口契约](.scratch/refund-agent-all-tech-demo/integration-contracts.md)和[订单号提取](.scratch/refund-agent-all-tech-demo/order-id-extraction-research.md)。
 - [领域术语](GLOSSARY.md)、[架构决策](docs/adr/)和[退款政策原文](policy/refund-policy.md)记录已确认的约定。[验收记录](evidence/)保存已执行的验证及结果。
 
-目前代码实现了查单、政策检索和订单资格咨询。施工总览也包含后续模拟退款等任务的验收目标。历史记录中的旧项目路径和部署环境信息用于追溯，当前运行方式见下文。
+目前代码实现了查单、政策检索、订单资格咨询和单轮明确授权的模拟退款。后续多轮办理和维护恢复见施工总览。历史记录中的旧项目路径和部署环境信息用于追溯，当前运行方式见下文。
 
 ## 环境配置与启动
 
@@ -33,20 +33,40 @@ py -3 -m mcp_service.server
 
 在同一目录打开另一个终端，运行 `py -3 cli.py`，输入「查一下 DEMO-1001」。MCP 服务代码位于 `mcp_service/`，订单业务位于 `mcp_service/orders/`。订单查询契约位于 `model/orders/`，退款政策模型位于 `model/policy/`，退款流程模型位于 `model/refund/`。
 
+## 长期偏好
+
+CLI 支持用聊天管理订单状态答复的详略。输入「请记住以后简短回答」保存偏好，「查看我的长期偏好」查看当前值，「请把我的长期偏好改为详细回答」覆盖旧值，「请删除我的答复详略偏好」删除。偏好随消费者跨会话使用，删除后仍可通过 `--history` 查看原始聊天。
+
+输入「查一下 DEMO-1001，这次请详细回答」可以只改变当次排版。简短和详细答复均包含订单号、支付状态、发货状态、模拟退款状态和实付金额。
+
 ## 退款政策发布与检索
 
-政策源位于 `policy/refund-policy.md`。安装依赖后，在 `config/local.json` 的 `policy` 部分填写 Milvus 地址、访问凭据和模型服务地址。MCP 服务和发布命令使用同一配置文件；不提供 `policy` 时，查单仍可运行，但政策发布和检索不可用。独立发布政策：
+演示政策源位于 `policy/refund-policy.md`。在配置文件的 `policy` 部分填写 Milvus 地址、访问凭据和模型服务地址。MCP 服务和发布命令使用同一政策目录及索引。隔离验收可配套指定 `catalog_database` 和 `milvus_collection`，默认使用 `order_demo` 和 `order_demo_refund_policy`。每套索引的发布历史由对应的目录管理。未配置 `policy` 时仍可查单。
+
+首次启用目录时，先初始化演示库，再发布演示政策 `1.0`，随后启动新版 MCP 服务。原集合已有 `1.0` 条目时，命令验证原件一致且可检索后登记为目录修订 `1`。
 
 ```powershell
-py -3 publish_policy.py
+py -3 publish_policy.py --source policy/refund-policy.md --version 1.0 --publisher demo-maintainer --qualification unchanged
 ```
 
-发布只管理专用集合的当前政策，重复执行使用固定条目标识，不删除历史版本。`search_policy` 的 `mode` 由 Host 选择，咨询先使用 `consultation`，必要时用 `formal` 补查一次。检索失败返回 `failed` 和空候选。
+发布其他文档或版本时，传入对应 Markdown 原件及其明确版本号。首行填写文档标题，标头使用 `文档编号：`、`版本：`。正式条款以 `## RF-003 — 条款标题` 开头，FAQ 以 `## FAQ-001 — 问题` 开头，后续正文为独立答案。命令完成 Milvus 强一致回读与检索验证后才切换 MySQL 目录。发布者用 `--qualification changed` 声明改变资格的版本，此类版本登记后须等待同版本结构化规则。
 
-运行 `py -3 test/verify_policy_mcp.py` 可通过独立 MCP 进程验证认证及真实检索。`py -3 test/verify_policy_store.py` 会向政策集合添加并保留一条 `0.0-probe` 历史版本样本，验证当前版本过滤；请在验收环境执行。
+切换回执不明确时，重跑同一发布命令，命令先核对版本的发布记录。首次生效前可修正原件并用同版本全量重发。若上一轮 Milvus 写入结果不明，确认上一发布进程已停止且服务器端写入已结束后加 `--confirm-write-ended`。已生效版本的更新与删除通过发布新版本完成。
 
-在 CLI 输入「退款多久能到账？」可咨询通用政策，输入「DEMO-1001 能退吗？」可查询本人订单资格。政策回复附本轮核验的正式条款，资格依据 MCP 返回的实际订单状态。只问「能退吗」时，CLI 会追问订单编号。当前 CLI 支持查单和咨询，识别到明确办理请求时会提示本轮未提交。
+`search_policy` 首次成功时返回目录修订号，即使候选为空。Host 首次咨询使用 `consultation`，必要时沿用同一修订号，用 `formal` 补查一次。检索失败返回 `failed` 和空候选。
+
+运行 `py -3 test/verify_policy_mcp.py` 可通过独立 MCP 进程验证认证及真实检索。运行 `py -3 test/verify_policy_catalog.py --config <验收配置> --evidence evidence/policy-16-integration.jsonl` 可在真实后端创建随机命名的目录和集合，验证版本切换、故障重试与 Host 读取。脚本退出时清理其创建的目录、集合、隔离会话和检查点。
+
+在 CLI 输入「退款多久能到账？」可咨询通用政策，输入「DEMO-1001 能退吗？」可查询本人订单资格。Host 运行时从 MCP 回执取政策正文和出处，无需政策 Markdown。通用咨询可引用适用的 FAQ 或正式条款。本人订单资格由代码根据实际订单状态计算，并引用正式条款。只问「能退吗」时，CLI 会追问订单编号。
 
 可用 `py -3 test/verify_policy_cli.py` 运行真实 CLI 咨询验收，覆盖通用政策、订单资格、意图对照和重排故障。脚本默认读取 `config/local.json`，并创建独立 MCP 服务和隔离会话，运行后清理测试会话和 checkpoint。
+
+## 模拟退款
+
+在 Host 和 MCP Server 配置相同的 `mcp.write_token`，并使用独立的 `mcp.read_token` 调查凭据。为 Host 设置 `refund_policy_events_dir`，指向可写的持久目录。该目录按幂等键保存每次最终政策核验的 JSONL，记录关联的 `trace_id` 和正式条款出处。未配置执行凭据或无法确认核验事件保存时，查单和原退款核对仍可使用。
+
+在 CLI 输入「如果能退，就帮我退 DEMO-1001」。演示按 MySQL 订单的实付金额办理整单原路模拟退款，回复显示订单号、金额和模拟退款单号。重复办理时直接核对原退款。结果待核对时，该订单暂停新的提交。
+
+运行 `py -3 -X utf8 test/verify_refund_submission.py --config <验收配置> --evidence evidence/refund-07-integration.jsonl` 可使用独立 MCP 进程及隔离的 MySQL 库和 Milvus 集合验收。应用的 `mysql.database` 默认使用 `order_demo`，该脚本会在临时配置中覆盖并清理自己创建的资源。
 
 安装 `pytest` 后，运行 `py -3 -m pytest -q test`，执行无需配置外部服务的测试。
