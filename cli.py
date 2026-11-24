@@ -6,13 +6,18 @@ from io import TextIOWrapper
 
 import httpx
 import pymysql
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import load_config
-from implementations.refund.conversations import SessionUnavailable
+from config.demo import CONSUMER_ID
+from implementations.refund.conversations import MySQLConversationService, SessionUnavailable
+from implementations.refund.dispatches import MySQLRefundDispatchService
 from implementations.refund.host import run_cli
-from model import connection_config, create_pool
+from implementations.refund.preferences import MySQLPreferences
 from utils.checkpoint import open_mysql_checkpointer
+from utils.database import create_mysql_engine
 from utils.events import log_event
+from utils.mysql import connection_config
 
 
 # 解析命令行参数，初始化存储并运行会话；返回进程退出码。
@@ -47,13 +52,17 @@ def main() -> int:
                 return 0
             # endregion
 
-            # region 打开业务连接并运行会话，结束时释放连接池
-            pool = create_pool()
+            # region 用同一 Engine 组装会话、退款提交和偏好 Service，运行结束后释放连接
+            engine = create_mysql_engine(mysql)
             try:
                 with httpx.Client(trust_env=False) as http:
-                    return run_cli(args, pool, saver, http)
+                    return run_cli(
+                        args, saver, http, conversations=MySQLConversationService(engine),
+                        dispatches=MySQLRefundDispatchService(engine),
+                        preferences=MySQLPreferences(engine, consumer_id=CONSUMER_ID),
+                    )
             finally:
-                pool.close()
+                engine.dispose()
             # endregion
 
     except SessionUnavailable:
@@ -63,7 +72,7 @@ def main() -> int:
         return 2
         # endregion
 
-    except (ValueError, pymysql.MySQLError) as exc:
+    except (ValueError, pymysql.MySQLError, SQLAlchemyError) as exc:
 
         # region 配置或数据库出错时记录失败并返回退出码 1
         log_event("host_unavailable", error_type=type(exc).__name__)

@@ -1,71 +1,211 @@
-"""Exercise real MySQL constraints in a disposable database."""
-import os
+"""在隔离 MySQL 中验收初始化、种子事务、约束及进程连接池。"""
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
 import sys
-import uuid
+from unittest.mock import patch
 
 import pymysql
+from sqlalchemy import event, text
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR))
-from model import connection_config
+
+import manage
+from config import load_config
+from config.limits import PolicyCatalogTables
+from implementations.policy.catalog import initialize_policy_catalog
+from launch_with_config import application_command
+from order_mysql_fixture import isolated_order_database
+from utils.database import create_mysql_engine
 
 
-def main():
-    name = 'order_demo_test_' + uuid.uuid4().hex[:12]
-    conn = pymysql.connect(**connection_config(), autocommit=True)
+def run_manage(config, command):
+    result = subprocess.run(application_command('manage', config, command),
+                            capture_output=True, text=True, encoding='utf-8', timeout=30)
+    assert result.returncode == 0, f'manage {command} exited {result.returncode}'
+    assert result.stdout.strip() == f'{command} completed'
+
+
+def rows(cursor, table):
+    cursor.execute(f'SELECT * FROM {table} ORDER BY 1')
+    return cursor.fetchall()
+
+
+def check_seed(config, cursor):
+    assert rows(cursor, 'orders') == rows(cursor, 'refunds') == ()
+    cursor.execute("""
+        CREATE TRIGGER fail_seed_refund BEFORE INSERT ON refunds FOR EACH ROW
+        SIGNAL SQLSTATE '45000' SET MYSQL_ERRNO=1644, MESSAGE_TEXT='isolated seed refund failure'
+    """)
+    engine = create_mysql_engine(load_config(config).mysql)
+    writes = []
+    errors = []
+
+    @event.listens_for(engine, 'before_cursor_execute')
+    def observe(connection, _cursor, statement, parameters, _context, _many):
+        if statement.startswith(('INSERT INTO orders', 'INSERT INTO refunds')):
+            assert connection.in_transaction()
+            writes.append((connection, statement.split()[2], parameters['order_id']))
+
+    @event.listens_for(engine, 'handle_error')
+    def observe_failure(context):
+        errors.append(context.original_exception.args[0])
+
     try:
-        with conn.cursor() as c:
-            c.execute(f'CREATE DATABASE `{name}` CHARACTER SET utf8mb4')
+        with patch.object(manage, 'load_config', return_value=load_config(config)), \
+                patch.object(manage, 'create_mysql_engine', return_value=engine), \
+                patch.object(sys, 'argv', ['manage.py', 'seed']):
             try:
-                c.execute(f'USE `{name}`')
-                for sql in PROJECT_DIR.joinpath('model', 'schema.sql').read_text(encoding='utf-8-sig').split(';'):
-                    if sql.strip(): c.execute(sql)
-                c.execute('ALTER TABLE refund_dispatches ADD CONSTRAINT fk_dispatch_refund FOREIGN KEY (refund_id, order_id) REFERENCES refunds(refund_id, order_id)')
-                c.execute("INSERT INTO orders VALUES ('o1','u','paid','unshipped',19900,'CNY',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)),('o2','u','paid','unshipped',5900,'CNY',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
-                c.execute("INSERT INTO conversation_sessions VALUES ('s','u',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
-                c.execute("INSERT INTO conversation_messages VALUES ('s',1,'user','授权',UTC_TIMESTAMP(6))")
-                insert = "INSERT INTO refund_dispatches (idempotency_key,order_id,session_id,source_message_sequence,status,trace_id,created_at,updated_at) VALUES (%s,%s,'s',%s,%s,'trace',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))"
-                c.execute(insert, ('d1','o1',1,'pending'))
-                def reject(sql, params, code):
-                    try: c.execute(sql, params)
-                    except pymysql.MySQLError as e:
-                        assert e.args[0] == code, e.args[0]
-                    else: raise AssertionError('expected MySQL rejection')
-                reject(insert, ('d1','o2',1,'pending'), 1062)
-                reject(insert, ('bad','o2',2,'pending'), 1452)
-                reject(insert, ('d2','o1',1,'unconfirmed'), 1062)
-                c.execute(insert, ('other','o2',1,'pending'))
-                c.execute("UPDATE refund_dispatches SET status='closed_no_refund' WHERE idempotency_key='d1'")
-                c.execute(insert, ('d2','o1',1,'unconfirmed'))
-                c.execute("INSERT INTO refunds VALUES ('r1','o1','d2',19900,'CNY','execution',UTC_TIMESTAMP(6))")
-                reject("INSERT INTO refunds VALUES ('r2','o1',NULL,19900,'CNY','seed',UTC_TIMESTAMP(6))", (), 1062)
-                reject("INSERT INTO refunds VALUES ('r2','o2','d2',5900,'CNY','execution',UTC_TIMESTAMP(6))", (), 1062)
-                print('Isolated foreign keys, duplicate keys, blocking transitions and independent orders: PASS')
-                for table in ('orders','refunds','refund_dispatches','conversation_sessions','conversation_messages','conversation_summaries','consumer_preferences'):
-                    c.execute(f'SHOW CREATE TABLE `{table}`')
-                    print(c.fetchone()[1] + ';')
-            finally:
-                c.execute(f'DROP DATABASE `{name}`')
+                manage.main()
+            except SystemExit as exc:
+                assert exc.code == 1
+            else:
+                raise AssertionError('expected an injected refund write failure')
+        assert errors == [1644]
+        assert [(table, order_id) for _, table, order_id in writes] == [
+            ('orders', 'DEMO-1001'), ('orders', 'DEMO-1002'), ('orders', 'DEMO-1003'), ('refunds', 'DEMO-1003'),
+        ]
+        assert all(connection is writes[0][0] for connection, _, _ in writes)
+        assert rows(cursor, 'orders') == rows(cursor, 'refunds') == ()
     finally:
-        conn.close()
-    # 每个子进程创建自己的连接池，一方关闭后另一方继续读取。
-    worker = "from model import create_pool; p=create_pool(); c=p.connection(); q=c.cursor(); q.execute('SELECT COUNT(*) FROM orders'); print(q.fetchone()[0],flush=True); input(); q.execute('SELECT COUNT(*) FROM orders'); print(q.fetchone()[0],flush=True); c.close(); p.close()"
-    processes = [subprocess.Popen([sys.executable,'-c',worker], cwd=PROJECT_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) for _ in range(2)]
+        engine.dispose()
+        cursor.execute('DROP TRIGGER fail_seed_refund')
+    print('真实退款写入错误 1644，独立连接确认三条订单全部回滚', flush=True)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        seeds = [workers.submit(run_manage, config, 'seed') for _ in range(2)]
+        for seed in seeds:
+            seed.result()
+    orders, refunds = rows(cursor, 'orders'), rows(cursor, 'refunds')
+    assert [row[:6] for row in orders] == [
+        ('DEMO-1001', 'DEMO-USER-01', 'paid', 'unshipped', 19900, 'CNY'),
+        ('DEMO-1002', 'DEMO-USER-01', 'unpaid', 'unshipped', 0, 'CNY'),
+        ('DEMO-1003', 'DEMO-USER-01', 'paid', 'unshipped', 8800, 'CNY'),
+        ('DEMO-1004', 'DEMO-USER-01', 'paid', 'shipped', 29900, 'CNY'),
+        ('DEMO-2001', 'DEMO-USER-02', 'paid', 'unshipped', 5900, 'CNY'),
+    ]
+    assert [row[:6] for row in refunds] == [('MOCK-RF-1003', 'DEMO-1003', None, 8800, 'CNY', 'seed')]
+    run_manage(config, 'seed')
+    assert rows(cursor, 'orders') == orders and rows(cursor, 'refunds') == refunds
+    print('两进程并发装载后仅持久化五笔订单与一笔配套退款，重跑保留全部字段', flush=True)
+
+    cursor.execute("UPDATE orders SET consumer_id='existing-owner', shipping_status='shipped', "
+                   "paid_amount_fen=123, updated_at=UTC_TIMESTAMP(6) WHERE order_id='DEMO-1003'")
+    cursor.execute("UPDATE refunds SET refund_id='existing-refund', amount_fen=123 WHERE order_id='DEMO-1003'")
+    existing_orders, existing_refunds = rows(cursor, 'orders'), rows(cursor, 'refunds')
+    run_manage(config, 'seed')
+    assert rows(cursor, 'orders') == existing_orders and rows(cursor, 'refunds') == existing_refunds
+    cursor.execute("DELETE FROM refunds WHERE order_id='DEMO-1003'")
+    engine = create_mysql_engine(load_config(config).mysql)
     try:
-        for p in processes:
-            assert p.stdin is not None and p.stdout is not None
-            assert int(p.stdout.readline()) >= 5
-        for p in processes:
-            assert p.stdin is not None and p.stdout is not None
-            p.stdin.write('\n'); p.stdin.flush()
-            assert int(p.stdout.readline()) >= 5
-            assert p.wait(timeout=10) == 0
-        print('Two processes with independent pools: PASS')
+        with engine.begin() as connection:
+            result = connection.execute(text(
+                "INSERT INTO orders (order_id,consumer_id,payment_status,shipping_status,paid_amount_fen,created_at,updated_at) "
+                "VALUES ('DEMO-1003','DEMO-USER-01','paid','unshipped',8800,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) "
+                "ON DUPLICATE KEY UPDATE order_id=orders.order_id"
+            ))
+            assert result.rowcount == 1
     finally:
-        for p in processes:
-            if p.poll() is None: p.kill(); p.wait()
+        engine.dispose()
+    run_manage(config, 'seed')
+    assert rows(cursor, 'orders') == existing_orders and rows(cursor, 'refunds') == ()
+    print('FOUND_ROWS 对重复键空更新返回 1；种子重跑保留已有业务事实且不补写退款', flush=True)
 
 
-if __name__ == '__main__': main()
+def check_initialization(config, cursor):
+    orders = rows(cursor, 'orders')
+    cursor.execute('ALTER TABLE refund_dispatches DROP FOREIGN KEY fk_dispatch_refund')
+    for _ in range(2):
+        run_manage(config, 'init')
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS "
+            "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='fk_dispatch_refund'"
+        )
+        assert cursor.fetchone() == (1,)
+        assert rows(cursor, 'orders') == orders
+    mysql = load_config(config).mysql
+    initialize_policy_catalog(mysql.database, mysql)
+    cursor.execute(f'UPDATE {PolicyCatalogTables.HEAD} SET revision=2')
+    initialize_policy_catalog(mysql.database, mysql)
+    cursor.execute(f'SELECT revision FROM {PolicyCatalogTables.HEAD}')
+    assert cursor.fetchone() == (2,)
+    print('管理入口可重复建表与补齐退款外键，政策目录初始化保留既有目录头', flush=True)
+
+
+def check_constraints(cursor):
+    cursor.execute("INSERT INTO orders VALUES ('o1','u','paid','unshipped',19900,'CNY',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)),"
+                   "('o2','u','paid','unshipped',5900,'CNY',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
+    cursor.execute("INSERT INTO conversation_sessions VALUES ('s','u',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
+    cursor.execute("INSERT INTO conversation_messages VALUES ('s',1,'user','授权',UTC_TIMESTAMP(6))")
+    insert = ("INSERT INTO refund_dispatches (idempotency_key,order_id,session_id,source_message_sequence,status,trace_id,"
+              "created_at,updated_at) VALUES (%s,%s,'s',%s,%s,'trace',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
+
+    def reject(sql, params, code):
+        try:
+            cursor.execute(sql, params)
+        except pymysql.MySQLError as exc:
+            assert exc.args[0] == code
+        else:
+            raise AssertionError('expected MySQL rejection')
+
+    cursor.execute(insert, ('d1', 'o1', 1, 'pending'))
+    reject(insert, ('d1', 'o2', 1, 'pending'), 1062)
+    reject(insert, ('bad', 'o2', 2, 'pending'), 1452)
+    reject(insert, ('d2', 'o1', 1, 'unconfirmed'), 1062)
+    cursor.execute(insert, ('other', 'o2', 1, 'pending'))
+    cursor.execute("UPDATE refund_dispatches SET status='closed_no_refund' WHERE idempotency_key='d1'")
+    cursor.execute(insert, ('d2', 'o1', 1, 'unconfirmed'))
+    cursor.execute("INSERT INTO refunds VALUES ('r1','o1','d2',19900,'CNY','execution',UTC_TIMESTAMP(6))")
+    reject("INSERT INTO refunds VALUES ('r2','o1',NULL,19900,'CNY','seed',UTC_TIMESTAMP(6))", (), 1062)
+    reject("INSERT INTO refunds VALUES ('r2','o2','d2',5900,'CNY','execution',UTC_TIMESTAMP(6))", (), 1062)
+    reject("UPDATE refund_dispatches SET refund_id='r1' WHERE idempotency_key='other'", (), 1452)
+    print('外键、重复键、未决限制和独立订单约束通过', flush=True)
+
+
+def check_worker_pools(config):
+    worker = """
+from sys import argv
+from sqlalchemy import text
+from config import load_config
+from utils.database import create_mysql_engine
+
+engine = create_mysql_engine(load_config(argv[1]).mysql)
+try:
+    for index in range(2):
+        with engine.connect() as connection:
+            print(connection.execute(text("SELECT COUNT(*) FROM orders")).scalar_one(), flush=True)
+        if index == 0:
+            input()
+finally:
+    engine.dispose()
+"""
+    workers = []
+    try:
+        for _ in range(2):
+            process = subprocess.Popen([sys.executable, '-X', 'utf8', '-c', worker, str(config)],
+                                       cwd=PROJECT_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            workers.append(process)
+        for process in workers:
+            assert process.stdout.readline().strip() == '7'
+        for process in workers:
+            output, _ = process.communicate(input='\n', timeout=30)
+            assert process.returncode == 0 and output.strip() == '7'
+    finally:
+        for process in workers:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    print('两个独立进程的 Core 连接池通过顺序释放和继续读取验证', flush=True)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=Path, help='授权的验收配置 JSON')
+    with isolated_order_database(parser.parse_args().config, seed=False) as (config, cursor):
+        check_seed(config, cursor)
+        check_initialization(config, cursor)
+        check_constraints(cursor)
+        check_worker_pools(config)

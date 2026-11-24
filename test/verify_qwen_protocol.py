@@ -3,13 +3,13 @@ import sys
 from pathlib import Path
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils.qwen_client import QwenChatOpenAI
+from utils.qwen_client import create_qwen_client
 from config import load_config
 
 class ProbeResult(BaseModel):
@@ -23,13 +23,9 @@ def probe_echo(value: str) -> str:
     return value
 
 def main():
-    endpoint = load_config().qwen.base_url.rstrip("/")
-    key = load_config().qwen.api_key
-    model = QwenChatOpenAI(
-        model="Qwen/Qwen3-8B", base_url=endpoint, api_key=SecretStr(key),
-        temperature=0, max_completion_tokens=512, max_retries=0, timeout=90,
-        http_socket_options=(), extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )
+    settings = load_config().qwen
+    endpoint = settings.base_url.rstrip("/")
+    model = create_qwen_client(settings)
     message = HumanMessage(content="Call probe_echo with value 'blue'.")
     first = model.bind_tools([probe_echo], tool_choice="auto").invoke([message])
     print("tool_calls:", first.tool_calls, flush=True)
@@ -68,10 +64,10 @@ def main():
     print("named_schema_rejects_extra_and_wrong_type")
 
     base = {
-        "model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": message.content}],
+        "model": settings.model, "messages": [{"role": "user", "content": message.content}],
         "temperature": 0, "chat_template_kwargs": {"enable_thinking": False},
     }
-    with httpx.Client(timeout=90, trust_env=False, headers={"Authorization": f"Bearer {key}"}) as http:
+    with httpx.Client(timeout=settings.timeout, trust_env=False) as http:
         for label, patch, expected in (
             ("extra_request_field", {"unrecognised_probe_field": True}, 400),
             ("missing_named_tool", {

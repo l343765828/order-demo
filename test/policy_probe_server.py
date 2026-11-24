@@ -5,9 +5,8 @@ import time
 from unittest.mock import patch
 import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mcp_service.server import make_app
+from mcp_service.server import open_app
 from config import load_config, use_config
-from model import create_pool
 
 
 def empty_recall(backend, vector, mode, versions):
@@ -54,8 +53,6 @@ if __name__ == '__main__':
             return original_search(query, mode, backend, **options)
 
         search.search_policy = pause_supplement
-    pool = create_pool()
-    try:
-        uvicorn.run(make_app(pool, load_config().mcp.read_token), host='127.0.0.1', port=int(sys.argv[1]), access_log=False, log_level='warning')
-    finally:
-        pool.close()
+    settings = load_config()
+    with open_app(settings) as app:
+        uvicorn.run(app, host='127.0.0.1', port=int(sys.argv[1]), access_log=False, log_level='warning')

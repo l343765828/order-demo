@@ -40,13 +40,11 @@ class MCPConfig:
     write_token: str | None = None
 
 
-# 保存 Qwen 模型服务地址和访问凭据。
+# 保存免鉴权 Qwen 服务的地址和模型参数。
 @dataclass(frozen=True)
 class QwenConfig:
     # Host 和调查子 Agent 调用 Qwen 的 API 基址。
     base_url: str
-    # 通过模型服务认证所需的 API 密钥，从本地配置读取。
-    api_key: str
     # 意图识别、计划生成和调查使用的模型标识。
     model: str = "Qwen/Qwen3-8B"
     # 单次模型请求允许生成的最大 token 数。
@@ -104,8 +102,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
         # region 读取 JSON 并构造配置对象
         data = json.loads(source.read_text(encoding="utf-8"))
+        qwen = {**data["qwen"]}
+        # 旧 JSON 可以继续读取，历史密钥不进入模型客户端。
+        qwen.pop("api_key", None)
         config = AppConfig(mysql=MySQLConfig(**data["mysql"]), mcp=MCPConfig(**data["mcp"]),
-                           qwen=QwenConfig(**data["qwen"]),
+                           qwen=QwenConfig(**qwen),
                            policy=PolicyConfig(**data["policy"]) if "policy" in data else None,
                            refund_policy_events_dir=data.get("refund_policy_events_dir"))
         # endregion
@@ -122,8 +123,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 )
                 for value in (
                     config.mysql.host, config.mysql.user, config.mysql.password, config.mcp.url,
-                    config.mysql.database, config.mcp.read_token, config.mcp.host, config.qwen.base_url,
-                    config.qwen.api_key, config.qwen.model,
+                    config.mysql.database, config.mcp.read_token, config.mcp.host, config.qwen.base_url, config.qwen.model,
                 )
             )
             # MySQL 端口未配置为整数。

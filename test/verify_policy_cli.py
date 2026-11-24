@@ -3,7 +3,7 @@
 import argparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
@@ -18,7 +18,6 @@ import time
 from http.server import ThreadingHTTPServer
 from uuid import uuid4
 
-import pymysql
 import httpx
 from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 
@@ -27,7 +26,6 @@ sys.path.insert(0, str(ROOT))
 from config import DEFAULT_PATH, load_config, use_config
 from config.demo import DemoPolicy
 from implementations.policy.backend import PolicyBackend
-from model import connection_config
 from implementations.policy.answer import NO_EVIDENCE, POLICY_UNAVAILABLE
 from implementations.policy.source import SOURCE_PATH, parse_policy
 from implementations.policy.evidence import verify_policy_evidence
@@ -35,7 +33,9 @@ from model.policy.evidence import PolicyEvidence
 from model.policy.search import PolicyEntry, PolicySearchResult, SearchPolicyRequest, policy_chunk_id
 from model.policy.status import PolicyEntryType, PolicySearchMode, PolicySearchStatus
 from utils.mcp_client import bind_mcp_tool, open_mcp_client
+from utils.mysql import connection_config, mysql_connection
 from launch_with_config import application_command
+from order_mysql_fixture import isolated_order_database
 from verify_order_cli import read_events
 import verify_policy_faults as faults
 
@@ -169,6 +169,19 @@ async def check_revision_receipts(path):
         ]}
 
 
+def copy_host_without_policy(folder):
+    host = Path(folder) / "host"
+    host.mkdir()
+    for name in ("config", "implementations", "interfaces", "model", "repositories", "utils", "workflows"):
+        shutil.copytree(ROOT / name, host / name, ignore=shutil.ignore_patterns("__pycache__", "*.json"))
+    shutil.copyfile(ROOT / "cli.py", host / "cli.py")
+    launcher = host / "test" / "launch_with_config.py"
+    launcher.parent.mkdir()
+    shutil.copyfile(ROOT / "test" / launcher.name, launcher)
+    assert not list(host.rglob("refund-policy.md"))
+    return host, launcher
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=DEFAULT_PATH, type=Path)
@@ -178,28 +191,44 @@ def main():
     mode.add_argument("--faults-only", action="store_true")
     mode.add_argument("--ticket15-extra", action="store_true")
     args = parser.parse_args()
-    use_config(args.config)
     settings = json.loads(args.config.read_text(encoding="utf-8"))
+    if load_config(args.config).policy is None:
+        parser.error("验收配置必须包含 policy 后端设置")
     evidence = []
     sessions = []
-    with tempfile.TemporaryDirectory() as folder, pymysql.connect(
-        database="order_demo", autocommit=True, **connection_config()
-    ) as db, db.cursor() as cur:
-        cur.execute("SELECT VERSION()")
-        version = cur.fetchone()[0]
-        print("SELECT VERSION():", version, flush=True)
-        assert version == "8.0.46"
+    with ExitStack() as resources:
+        order_config, cur = resources.enter_context(isolated_order_database(args.config))
+        folder = Path(resources.enter_context(tempfile.TemporaryDirectory()))
+        mysql = load_config(order_config).mysql
+        settings["mysql"]["database"] = mysql.database
+        settings["policy"].update(catalog_database=mysql.database, milvus_collection=mysql.database)
+        isolation = folder / "isolated-config.json"
+        isolation.write_text(json.dumps(settings), encoding="utf-8")
+        use_config(isolation)
+        db = resources.enter_context(mysql_connection(mysql.database, **connection_config(mysql)))
         saver = PyMySQLSaver(db)
+        saver.setup()
 
-        host = Path(folder) / "host"
-        host.mkdir()
-        for name in ("config", "implementations", "interfaces", "model", "utils", "workflows"):
-            shutil.copytree(ROOT / name, host / name, ignore=shutil.ignore_patterns("__pycache__", "*.json"))
-        shutil.copyfile(ROOT / "cli.py", host / "cli.py")
-        launcher = host / "test" / "launch_with_config.py"
-        launcher.parent.mkdir()
-        shutil.copyfile(ROOT / "test" / launcher.name, launcher)
-        assert not list(host.rglob("refund-policy.md"))
+        backend = PolicyBackend()
+        resources.callback(backend.close)
+        assert not backend.client.has_collection(backend.collection), "isolated collection name is already in use"
+
+        def remove_collection():
+            if backend.client.has_collection(backend.collection):
+                backend.client.drop_collection(backend.collection)
+            assert not backend.client.has_collection(backend.collection)
+            print("isolated Milvus collection removed", flush=True)
+
+        resources.callback(remove_collection)
+        published = subprocess.run(
+            [sys.executable, "-X", "utf8", str(ROOT / "publish_policy.py"), "--config", str(isolation),
+             "--source", str(SOURCE_PATH), "--version", DemoPolicy.BASELINE_VERSION,
+             "--publisher", "policy-cli-verification", "--qualification", "unchanged"],
+            cwd=ROOT, capture_output=True, encoding="utf-8", timeout=300,
+        )
+        assert published.returncode == 0, f"isolated policy publication exited {published.returncode}"
+        assert json.loads(published.stdout)["catalog_revision"] == 1
+        host, launcher = copy_host_without_policy(folder)
 
         def counts():
             cur.execute("SELECT (SELECT COUNT(*) FROM refunds), (SELECT COUNT(*) FROM refund_dispatches)")

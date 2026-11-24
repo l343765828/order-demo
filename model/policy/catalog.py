@@ -49,6 +49,12 @@ class PolicySnapshot(StrictModel):
     versions: list[PolicyVersion] = Field(min_length=1)
 
 
+# 目录快照查询返回的一份生效文档版本及所属修订。
+class PolicySnapshotRow(PolicyVersion):
+    # 本次读取所指定或解析出的目录修订，同一快照的各行取值相同。
+    revision: PolicyCatalogRevision
+
+
 # 已从权威源解析并校验的完整文档。
 class PolicyDocument(StrictModel):
     # 从源文档和命令的显式版本确认的发布身份。

@@ -5,10 +5,10 @@ import pytest
 from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pymysql import OperationalError
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import QueuePool
 from model.orders.query import GetOrderRequest, OrderQueryResult
 from model.orders.status import OrderQueryStatus, PaymentStatus, RefundStatus, ShippingStatus
-from mcp_service.orders.query import query_order
 
 
 def test_request_rejects_identity_and_invalid_order():
@@ -41,15 +41,22 @@ def test_result_rejects_inconsistent_status(payload):
         OrderQueryResult.model_validate(payload)
 
 
-def test_database_failure_is_distinct_and_hides_details():
-    class BrokenPool:
-        def connection(self):
-            raise OperationalError(2003, 'sensitive connection details')
+def test_database_failure_hides_details_and_returns_connection():
+    from implementations.orders.query import MySQLOrderQueryService
 
-    result = query_order(BrokenPool(), GetOrderRequest(order_id='DEMO-1001'), 'DEMO-USER-01')
-    assert result.status is OrderQueryStatus.FAILED
-    assert result.order is None
-    assert 'sensitive' not in str(result)
+    engine = create_engine('sqlite://', poolclass=QueuePool, pool_size=1)
+    try:
+        result = MySQLOrderQueryService(engine).query_order(
+            GetOrderRequest(order_id="sensitive'order"), authenticated_consumer_id='DEMO-USER-01',
+        )
+        assert result.model_dump(mode='json') == {
+            'status': 'failed', 'order': None, 'error': '订单服务暂时不可用',
+        }
+        assert engine.pool.checkedout() == 0
+        with engine.connect() as connection:
+            assert connection.execute(text('SELECT 1')).scalar_one() == 1
+    finally:
+        engine.dispose()
 
 
 def test_order_statuses_round_trip_the_existing_payload():

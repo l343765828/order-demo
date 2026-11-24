@@ -5,15 +5,16 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
-from pymysql import MySQLError
 from openai import OpenAIError
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import AppConfig
 from config.demo import DemoPolicy
 from implementations.policy.evidence import verify_policy_evidence
-from implementations.refund import controlled_tools, dispatches
+from implementations.refund import controlled_tools
 from implementations.refund.qualification import reject_refund_for_order_state
 from interfaces.refund.decision import Decide
+from interfaces.refund.storage import RefundDispatchService
 from model.orders.query import OrderQueryResult
 from model.orders.status import OrderQueryStatus, RefundStatus
 from model.policy.evidence import EligibilityClause, PolicyEvidence, RefundClauseMeaning
@@ -50,10 +51,10 @@ def _matches_execution_policy(excerpt: str, interpret: Decide) -> bool:
 # 固定节点共享的业务能力，绑定数据库、独立 MCP 配置和当前会话事件。
 class RefundExecution:
     # 注入当前 Host 的存储、配置和事件输出。
-    def __init__(self, pool, settings: AppConfig, emit: Callable[..., None]):
+    def __init__(self, dispatches: RefundDispatchService, settings: AppConfig, emit: Callable[..., None]):
 
         # region 保存可信运行配置及依赖
-        self.pool = pool
+        self.dispatches = dispatches
         self.settings = settings
         self.emit = emit
         # endregion
@@ -63,8 +64,8 @@ class RefundExecution:
 
         # region 尝试更新未决提交，原回执不受回写故障影响
         try:
-            dispatches.record_dispatch_result(self.pool, key, result)
-        except MySQLError as exc:
+            self.dispatches.record_dispatch_result(key, result)
+        except SQLAlchemyError as exc:
             self.emit(RefundEvent.STORE_FAILED.value, idempotency_key=key, error_type=type(exc).__name__)
         # endregion
 
@@ -120,8 +121,8 @@ class RefundExecution:
 
         # region 优先直接核对原退款或未决提交，无需再次检索政策
         try:
-            key = dispatches.blocking_dispatch(self.pool, authorization)
-        except MySQLError:
+            key = self.dispatches.blocking_dispatch(authorization)
+        except (SQLAlchemyError, ValueError):
             if order.refund_status is RefundStatus.REFUNDED:
                 return self._lookup(order.order_id, trace_id)
             return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.EXECUTION_UNAVAILABLE)
@@ -196,12 +197,12 @@ class RefundExecution:
         key = event.idempotency_key
         authorization = event.authorization
         try:
-            if not dispatches.reserve_dispatch(self.pool, event):
-                blocker = dispatches.blocking_dispatch(self.pool, authorization)
+            if not self.dispatches.reserve_dispatch(event):
+                blocker = self.dispatches.blocking_dispatch(authorization)
                 if blocker is not None:
                     return self._lookup(authorization.order_id, event.trace_id, blocker)
                 return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.DISPATCH_NOT_SAVED)
-        except MySQLError as exc:
+        except (SQLAlchemyError, ValueError) as exc:
             self.emit(RefundEvent.STORE_FAILED.value, idempotency_key=key, stage=RefundEvent.DISPATCH_SAVED.value,
                       error_type=type(exc).__name__)
             return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.DISPATCH_NOT_SAVED)

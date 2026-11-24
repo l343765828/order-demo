@@ -1,65 +1,104 @@
-"""初始化退款演示数据库和装载演示种子。"""
+"""初始化退款演示数据库并在单一事务内装载演示种子。"""
+
 from pathlib import Path
 
-import pymysql
+from sqlalchemy import Engine
 
-from config import load_config
-from config.demo import CONSUMER_ID
-from model import connection_config
+from config import MySQLConfig
+from config.demo import CONSUMER_ID, DemoSeed
+from config.limits import ConnectionLimits, RefundTables
+from model.orders.record import DemoSeedOrderId, OrderFacts
 from model.orders.status import PaymentStatus, ShippingStatus
-from model.refund.status import DemoDataCommand
+from model.refund.status import RefundSource
+from model.refund.submission import RefundReceipt
+from repositories.order_repository import insert_order
+from repositories.refund_repository import insert_refund
+from utils.mysql import connection_config, mysql_connection
 
 
-# 根据管理命令初始化应用表或装载演示种子。
-def manage_demo_data(command: DemoDataCommand) -> None:
+# 使用独立管理连接补齐演示数据库、应用表及退款外键。
+def initialize_demo_database(mysql: MySQLConfig) -> None:
 
-    # region 使用独立数据库连接初始化演示库或装载种子数据
-    mysql = load_config().mysql
-    connection = pymysql.connect(**connection_config(mysql), autocommit=True)
-    try:
-        with connection.cursor() as cursor:
-            match command:
+    # region 创建并选中配置指定的演示库
+    with mysql_connection(None, **connection_config(mysql)) as connection, connection.cursor() as cursor:
+        database = mysql.database.replace("`", "``")
+        cursor.execute(
+            f"CREATE DATABASE IF NOT EXISTS `{database}` CHARACTER SET {ConnectionLimits.MYSQL_CHARSET} "
+            f"COLLATE {ConnectionLimits.MYSQL_DATABASE_COLLATION}"
+        )
+        connection.select_db(mysql.database)
 
-                # region init 补齐缺失的演示库、应用表和退款外键
-                case DemoDataCommand.INIT:
-                    database = mysql.database.replace("`", "``")
-                    cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
-                    connection.select_db(mysql.database)
-                    for statement in (Path(__file__).resolve().parents[2] / "model" / "schema.sql").read_text(encoding="utf-8-sig").split(";"):
-                        if statement.strip():
-                            cursor.execute(statement)
-                    cursor.execute("SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='fk_dispatch_refund'")
-                    if not cursor.fetchone()[0]:
-                        cursor.execute("ALTER TABLE refund_dispatches ADD CONSTRAINT fk_dispatch_refund FOREIGN KEY (refund_id, order_id) REFERENCES refunds(refund_id, order_id)")
-                # endregion
+        # region 按原有顺序补齐应用表和提交记录到退款的外键
+        schema = Path(__file__).resolve().parents[2] / "model" / "schema.sql"
+        for statement in schema.read_text(encoding="utf-8-sig").split(";"):
+            if statement.strip():
+                cursor.execute(statement)
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS "
+            "WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME=%s",
+            (RefundTables.DISPATCH_REFUND_FOREIGN_KEY,),
+        )
+        if cursor.fetchone()[0] == 0:
 
-                # region seed 保留已有订单，仅为本次新插入的指定订单写入种子退款
-                case DemoDataCommand.SEED:
-                    connection.select_db(mysql.database)
-                    # 已有业务记录优先；重装种子不会覆盖订单或退款。
-                    rows = [("DEMO-1001", CONSUMER_ID, PaymentStatus.PAID, ShippingStatus.UNSHIPPED, 19900),
-                            ("DEMO-1002", CONSUMER_ID, PaymentStatus.UNPAID, ShippingStatus.UNSHIPPED, 0),
-                            ("DEMO-1003", CONSUMER_ID, PaymentStatus.PAID, ShippingStatus.UNSHIPPED, 8800),
-                            ("DEMO-1004", CONSUMER_ID, PaymentStatus.PAID, ShippingStatus.SHIPPED, 29900),
-                            ("DEMO-2001", "DEMO-USER-02", PaymentStatus.PAID, ShippingStatus.UNSHIPPED, 5900)]
-                    connection.autocommit(False)
-                    try:
-                        for order_id, consumer_id, payment, shipping, amount in rows:
-                            cursor.execute("INSERT INTO orders (order_id,consumer_id,payment_status,shipping_status,paid_amount_fen,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE order_id=orders.order_id",
-                                           (order_id, consumer_id, payment.value, shipping.value, amount))
-                            if (
-                                # 当前订单是预置为已退款的演示样例。
-                                order_id == "DEMO-1003"
-                                # 本次初始化刚插入该订单，需要同时补入模拟退款记录。
-                                and cursor.rowcount == 1
-                            ):
-                                cursor.execute("INSERT INTO refunds (refund_id,order_id,amount_fen,source,created_at) VALUES ('MOCK-RF-1003','DEMO-1003',8800,'seed',UTC_TIMESTAMP(6))")
-                        connection.commit()
-                    except Exception:
-                        connection.rollback()
-                        raise
-                # endregion
+            # region 外键缺失时补齐退款引用
+            cursor.execute(
+                f"ALTER TABLE {RefundTables.DISPATCHES} ADD CONSTRAINT {RefundTables.DISPATCH_REFUND_FOREIGN_KEY} "
+                f"FOREIGN KEY (refund_id, order_id) REFERENCES {RefundTables.REFUNDS}(refund_id, order_id)"
+            )
+            # endregion
 
-    finally:
-        connection.close()
+        # endregion
+
     # endregion
+
+
+# 使用入口提供的 Engine 管理演示种子装载事务。
+class MySQLSeedService:
+    # 保存与演示数据库绑定的 Engine。
+    def __init__(self, engine: Engine) -> None:
+
+        # region 保存入口注入的 Engine
+        self._engine = engine
+        # endregion
+
+    # 装载固定样例，仅在配套订单首次插入时同时创建种子退款。
+    def seed(self) -> None:
+
+        # region 构造演示订单事实，保留既有样例的顺序、归属和状态
+        orders = (
+            OrderFacts(order_id=DemoSeedOrderId.PAID.value, consumer_id=CONSUMER_ID,
+                       payment_status=PaymentStatus.PAID, shipping_status=ShippingStatus.UNSHIPPED,
+                       paid_amount_fen=DemoSeed.PAID_AMOUNT_FEN, currency=DemoSeed.CURRENCY),
+            OrderFacts(order_id=DemoSeedOrderId.UNPAID.value, consumer_id=CONSUMER_ID,
+                       payment_status=PaymentStatus.UNPAID, shipping_status=ShippingStatus.UNSHIPPED,
+                       paid_amount_fen=DemoSeed.UNPAID_AMOUNT_FEN, currency=DemoSeed.CURRENCY),
+            OrderFacts(order_id=DemoSeedOrderId.REFUNDED.value, consumer_id=CONSUMER_ID,
+                       payment_status=PaymentStatus.PAID, shipping_status=ShippingStatus.UNSHIPPED,
+                       paid_amount_fen=DemoSeed.REFUNDED_AMOUNT_FEN, currency=DemoSeed.CURRENCY),
+            OrderFacts(order_id=DemoSeedOrderId.SHIPPED.value, consumer_id=CONSUMER_ID,
+                       payment_status=PaymentStatus.PAID, shipping_status=ShippingStatus.SHIPPED,
+                       paid_amount_fen=DemoSeed.SHIPPED_AMOUNT_FEN, currency=DemoSeed.CURRENCY),
+            OrderFacts(order_id=DemoSeedOrderId.OTHER_CONSUMER.value, consumer_id=DemoSeed.OTHER_CONSUMER_ID,
+                       payment_status=PaymentStatus.PAID, shipping_status=ShippingStatus.UNSHIPPED,
+                       paid_amount_fen=DemoSeed.OTHER_AMOUNT_FEN, currency=DemoSeed.CURRENCY),
+        )
+        # endregion
+
+        # region 在同一事务装载新订单与配套退款，任一写入失败则回滚整批
+        with self._engine.begin() as connection:
+            for order in orders:
+                inserted = insert_order(connection, order=order)
+                if (
+                    # 当前订单由本次种子装载首次插入。
+                    inserted
+                    # 当前订单是配有模拟退款的样例。
+                    and order.order_id == DemoSeedOrderId.REFUNDED
+                ):
+
+                    # region 指定订单首次插入后写入配套种子退款
+                    receipt = RefundReceipt(order_id=order.order_id, refund_id=DemoSeed.REFUND_ID,
+                                            amount_fen=order.paid_amount_fen, currency=order.currency)
+                    insert_refund(connection, receipt=receipt, key=None, source=RefundSource.SEED)
+                    # endregion
+
+        # endregion

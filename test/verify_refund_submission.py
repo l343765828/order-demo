@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from threading import Event
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -27,13 +29,13 @@ from config import load_config, use_config
 from config.demo import CONSUMER_ID, DemoPolicy
 from implementations.policy.backend import PolicyBackend
 from implementations.policy.source import SOURCE_PATH
-from model import connection_config
+from utils.mysql import connection_config
 from model.orders.query import OrderQueryResult
 from model.policy.search import PolicySearchResult, SearchPolicyRequest
 from model.refund.flow import ConversationDecision, InvestigationPlan, InvestigationStep, OrderToolEvent, PolicyToolEvent
 from model.refund.status import ConversationIntent, InvestigationKind, OrderGoal
-from model.refund.status import RefundOutcome, RefundReason
-from model.refund.submission import RefundResult, SubmitMockRefundRequest
+from model.refund.status import RefundEvent, RefundOutcome, RefundReason
+from model.refund.submission import GetRefundResultRequest, RefundResult, SubmitMockRefundRequest
 from utils.events import log_event
 from utils.mcp_client import bind_mcp_tool, mcp_correlation_meta, open_mcp_client
 from launch_with_config import application_command
@@ -43,7 +45,9 @@ from verify_policy_catalog import cli_publish
 
 def application(module, config, *args, fault=None):
     command = application_command(module, config, *args)
-    use_probe = module == 'cli' and '--message' in args and (config.parent / 'investigation-probe').exists()
+    use_probe = module == 'cli' and '--message' in args and any(
+        (config.parent / flag).exists() for flag in ('investigation-probe', 'db-faults')
+    )
     if fault or use_probe:
         command = [sys.executable, '-X', 'utf8', __file__, '--probe', module, str(config), fault or 'none', *args]
     result = subprocess.run(command, cwd=ROOT, text=True, encoding='utf-8', errors='replace',
@@ -81,8 +85,9 @@ def mcp_events(log):
     return read_events(log.read_text(encoding='utf-8'))
 
 
-def cli_turn(config, prompt, expected, *, fault=None):
-    run = application('cli', config, '--message', prompt, fault=fault)
+def cli_turn(config, prompt, expected, *, fault=None, session=None):
+    session_args = ('--session', session) if session else ()
+    run = application('cli', config, *session_args, '--message', prompt, fault=fault)
     events = read_events(run.stderr)
     assert expected in run.stdout, (run.stdout, events, run.stderr[-2000:])
     assert events and events[-1]['event'] == 'turn_completed'
@@ -94,20 +99,26 @@ def refund_request(order):
     return f'如果能退，就帮我退 {order}'
 
 
-def seed_order(cursor, order):
+def seed_order(cursor, order, consumer=CONSUMER_ID):
     cursor.execute(
         "INSERT INTO orders (order_id,consumer_id,payment_status,shipping_status,paid_amount_fen,created_at,updated_at) "
         "VALUES (%s,%s,'paid','unshipped',19900,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
-        (order, CONSUMER_ID),
+        (order, consumer),
     )
 
 
-def seed_dispatch(cursor, order, consumer=CONSUMER_ID, revoked=False):
-    key, session, trace = (str(uuid4()) for _ in range(3))
+def seed_source(cursor, order, consumer=CONSUMER_ID):
+    session = str(uuid4())
     cursor.execute("INSERT INTO conversation_sessions VALUES (%s,%s,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
                    (session, consumer))
     cursor.execute("INSERT INTO conversation_messages VALUES (%s,1,'user',%s,UTC_TIMESTAMP(6))",
                    (session, refund_request(order)))
+    return session
+
+
+def seed_dispatch(cursor, order, consumer=CONSUMER_ID, revoked=False):
+    key, trace = (str(uuid4()) for _ in range(2))
+    session = seed_source(cursor, order, consumer)
     cursor.execute(
         "INSERT INTO refund_dispatches "
         "(idempotency_key,order_id,session_id,source_message_sequence,status,trace_id,revoked_at,created_at,updated_at) "
@@ -247,13 +258,108 @@ def probe(module, config, fault, args):
 
         MilvusClient.search = inspect
         PolicyBackend.rerank = policy_fault
+        if (config.parent / 'db-faults').exists():
+            install_mcp_db_faults()
     else:
         if (config.parent / 'investigation-probe').exists():
             install_investigation_probe(settings)
         if fault != 'none':
             install_cli_fault(fault, settings)
+        if (config.parent / 'db-faults').exists():
+            observe_cli_db_boundary(settings)
     sys.argv = [module, *args]
     runpy.run_module(module, run_name='__main__', alter_sys=True)
+
+
+def install_mcp_db_faults():
+    from sqlalchemy import event
+    from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
+    from sqlalchemy.engine import Engine
+
+    commit = MySQLDialect_pymysql.do_commit
+    pending_faults = {}
+    faults = {
+        'DEMO-1027': 'after_insert',
+        'DEMO-1028': 'commit_ack',
+        'DEMO-1029': 'commit_disconnect',
+    }
+
+    @event.listens_for(Engine, 'after_cursor_execute')
+    def after_insert(connection, _cursor, statement, _parameters, context, _executemany):
+        if not statement.startswith('INSERT INTO refunds'):
+            return
+        order = context.compiled_parameters[0]['order_id']
+        fault = faults.get(order)
+        if fault is None:
+            return
+        log_event('probe_refund_inserted', order_id=order, fault=fault)
+        if fault == 'after_insert':
+            raise ValueError('injected failure after real insert, before commit')
+        pending_faults[connection.connection.dbapi_connection] = (order, fault)
+
+    def commit_with_disconnect(dialect, connection):
+        fault = pending_faults.pop(connection.dbapi_connection, None)
+        if fault is None:
+            return commit(dialect, connection)
+        order, mode = fault
+        if mode == 'commit_ack':
+            commit(dialect, connection)
+        connection.dbapi_connection.close()
+        log_event('probe_refund_commit_disconnect', order_id=order, committed=mode == 'commit_ack')
+        raise pymysql.OperationalError(2013, 'injected disconnect in commit')
+
+    @event.listens_for(Engine, 'connect')
+    def shorten_probe_lock_wait(dbapi_connection, _connection_record):
+        with dbapi_connection.cursor() as cursor:
+            cursor.execute('SET SESSION innodb_lock_wait_timeout=2')
+
+    MySQLDialect_pymysql.do_commit = commit_with_disconnect
+
+
+def track_open_transactions(engine):
+    from sqlalchemy import event
+
+    active = set()
+    event.listen(engine, 'begin', active.add)
+    event.listen(engine, 'commit', active.discard)
+    event.listen(engine, 'rollback', active.discard)
+    return active
+
+
+def observe_cli_db_boundary(settings):
+    from implementations.refund import controlled_tools
+    from utils import database
+
+    create_engine = database.create_mysql_engine
+    active = set()
+    send, lookup = controlled_tools.send_refund, controlled_tools.read_refund
+
+    def track_engine(*args, **kwargs):
+        nonlocal active
+        engine = create_engine(*args, **kwargs)
+        active = track_open_transactions(engine)
+        return engine
+
+    def check_send(mcp, request, trace, **kwargs):
+        assert not active
+        path = Path(settings.refund_policy_events_dir) / f'{request.idempotency_key}.jsonl'
+        assert json.loads(path.read_text(encoding='utf-8'))['trace_id'] == trace
+        with pymysql.connect(database=settings.mysql.database, autocommit=True,
+                             **connection_config(settings.mysql)) as db, db.cursor() as cursor:
+            stored, refunds = records(cursor, request.order_id)
+            assert stored == ((request.idempotency_key, 'pending', None, trace, None),)
+            assert not refunds
+        log_event('probe_mcp_outside_transaction', trace_id=trace, operation='send')
+        return send(mcp, request, trace, **kwargs)
+
+    def check_lookup(mcp, request, trace):
+        assert not active
+        log_event('probe_mcp_outside_transaction', trace_id=trace, operation='lookup')
+        return lookup(mcp, request, trace)
+
+    database.create_mysql_engine = track_engine
+    controlled_tools.send_refund = check_send
+    controlled_tools.read_refund = check_lookup
 
 
 def install_investigation_probe(settings):
@@ -302,6 +408,7 @@ def install_investigation_probe(settings):
 
 def install_cli_fault(fault, settings):
     from implementations.refund import controlled_tools, dispatches, execution, reply
+    from sqlalchemy.exc import OperationalError
 
     def ship(order):
         with pymysql.connect(database=settings.mysql.database, autocommit=True,
@@ -319,14 +426,14 @@ def install_cli_fault(fault, settings):
 
         execution.persist_event = lose_event
     elif fault in ('dispatch_before', 'dispatch_ack'):
-        reserve = dispatches.reserve_dispatch
+        reserve = dispatches.MySQLRefundDispatchService.reserve_dispatch
 
         def lose_dispatch(*args, **kwargs):
             if fault == 'dispatch_ack':
                 assert reserve(*args, **kwargs)
-            raise pymysql.OperationalError(2013, 'injected submission acknowledgement fault')
+            raise OperationalError(None, None, pymysql.OperationalError(2013, 'injected submission acknowledgement fault'))
 
-        dispatches.reserve_dispatch = lose_dispatch
+        dispatches.MySQLRefundDispatchService.reserve_dispatch = lose_dispatch
     elif fault == 'refetch_shipped':
         read = controlled_tools.read_order
 
@@ -467,6 +574,9 @@ def check_outcomes(config, cursor, log, record):
         ('DEMO-1024', 'template', '19900 分', 'simulated_succeeded', 'succeeded', 1),
         ('DEMO-1025', None, '执行失败', 'failed', 'closed_no_refund', 1),
         ('DEMO-1026', 'writer_setup', '退款服务暂时不可用', 'failed', 'closed_no_refund', 0),
+        ('DEMO-1027', None, '执行失败', 'failed', 'closed_no_refund', 1),
+        ('DEMO-1028', None, '已完成模拟退款', 'already_refunded', 'succeeded', 1),
+        ('DEMO-1029', None, '结果未确认', 'unconfirmed', 'unconfirmed', 1),
     )
     cursor.execute("ALTER TABLE refunds ADD CONSTRAINT check_probe_failure CHECK (order_id <> 'DEMO-1025')")
     for order, *_ in cases:
@@ -486,11 +596,172 @@ def check_outcomes(config, cursor, log, record):
         if fault in ('lost_success', 'lost_denial'):
             names = [e['event'] for e in mcp]
             assert names.index('mcp_submit_mock_refund') < names.index('mcp_get_refund_result')
-        record({'case': fault or 'explicit_failure', **turn, 'mcp': mcp, 'database': [stored, refunds]})
+        db_fault_cases = {'DEMO-1027': 'rollback_after_insert', 'DEMO-1028': 'commit_ack_lost',
+                          'DEMO-1029': 'commit_disconnect'}
+        if order in db_fault_cases:
+            insert_event, = [e for e in mcp_events(log)
+                             if e['event'] == 'probe_refund_inserted' and e['order_id'] == order]
+            assert insert_event['fault'] in ('after_insert', 'commit_ack', 'commit_disconnect')
+            if order in ('DEMO-1028', 'DEMO-1029'):
+                disconnect, = [e for e in mcp_events(log)
+                               if e['event'] == 'probe_refund_commit_disconnect' and e['order_id'] == order]
+                assert disconnect['committed'] == (order == 'DEMO-1028')
+                assert [(e['event'], e['status']) for e in mcp if e['event'] in (
+                    'mcp_submit_mock_refund', 'mcp_get_refund_result',
+                )] == [('mcp_submit_mock_refund', 'unconfirmed'),
+                       ('mcp_get_refund_result', 'found' if refunds else 'not_found')]
+                assert [e['operation'] for e in turn['events'] if e['event'] == 'probe_mcp_outside_transaction'] == [
+                    'send', 'lookup',
+                ]
+                mcp += [disconnect]
+            mcp += [insert_event]
+        record({'case': db_fault_cases.get(order, fault or 'explicit_failure'), **turn,
+                'mcp': mcp, 'database': [stored, refunds]})
         if fault in ('lost_denial', 'template'):
             again = cli_turn(config, refund_request(order), '结果未确认' if fault == 'lost_denial' else refunds[0][0])
             assert not submit_calls(log, again['trace_id']) and records(cursor, order) == (stored, refunds)
             record({'case': f'{fault}_followup', **again})
+        if order in ('DEMO-1028', 'DEMO-1029'):
+            history = application('cli', config, '--session', turn['session_id'], '--history')
+            assert turn['prompt'] in history.stdout and turn['reply'] in history.stdout
+            for session in (turn['session_id'], None):
+                again = cli_turn(config, refund_request(order), refunds[0][0] if refunds else '结果未确认',
+                                 session=session)
+                assert (again['session_id'] == turn['session_id']) == (session is not None)
+                assert not submit_calls(log, again['trace_id']) and records(cursor, order) == (stored, refunds)
+                lookup, = [e for e in mcp_events(log) if e.get('trace_id') == again['trace_id']
+                           and e['event'] == 'mcp_get_refund_result']
+                assert lookup['status'] == ('found' if refunds else 'not_found')
+                suffix = '_reopen' if session else '_new_session'
+                record({'case': db_fault_cases[order] + suffix, 'history_restored': bool(session),
+                        'mcp': lookup, **again})
+
+
+def check_lock_contention(config, cursor, record):
+    settings = load_config(config)
+    order = 'DEMO-1040'
+    seed_order(cursor, order)
+    key = seed_dispatch(cursor, order)
+    with pymysql.connect(database=settings.mysql.database, **connection_config(settings.mysql)) as db, db.cursor() as lock:
+        lock.execute('SELECT idempotency_key FROM refund_dispatches WHERE idempotency_key=%s FOR UPDATE', (key,))
+        assert lock.fetchone() == (key,)
+        blocked = asyncio.run(direct_submission(config, order, key))
+        assert (blocked['status'], blocked['reason']) == ('failed', 'database_failure')
+        assert records(cursor, order)[0][0][1] == 'pending' and not records(cursor, order)[1]
+        db.rollback()
+    retried = asyncio.run(direct_submission(config, order, key))
+    assert retried['status'] == 'simulated_succeeded'
+    assert len(records(cursor, order)[1]) == 1
+    record({'case': 'dispatch_row_lock_timeout_and_release', 'blocked': blocked, 'retried': retried})
+
+
+def check_lookup_scope(config, cursor, record):
+    from implementations.refund.controlled_tools import read_refund
+
+    other = 'DEMO-1042'
+    seed_order(cursor, other, 'DEMO-USER-02')
+    cursor.execute(
+        "INSERT INTO refunds VALUES (%s,%s,NULL,19900,'CNY','seed',UTC_TIMESTAMP(6))",
+        ('MOCK-RF-1042', other),
+    )
+    settings = load_config(config).mcp
+    results = {}
+    for order, expected in (('DEMO-1003', 'found'), (other, 'not_found'), ('DEMO-1099', 'not_found')):
+        result = read_refund(settings, GetRefundResultRequest(order_id=order, idempotency_key=str(uuid4())),
+                             str(uuid4()))
+        assert result.status.value == expected
+        assert (result.refund.refund_id if result.refund else None) == ('MOCK-RF-1003' if order == 'DEMO-1003' else None)
+        results[order] = result.model_dump(mode='json')
+    record({'case': 'read_refund_consumer_scope', 'results': results})
+
+
+def check_legacy_order_facts(config, cursor, record):
+    results = {}
+    for order, revoked, existing, status, reason in (
+        ('DEMO-1043', True, True, 'already_refunded', None),
+        ('DEMO-1044', True, False, 'denied', 'invalid_dispatch'),
+        ('DEMO-1045', False, False, 'failed', 'database_failure'),
+    ):
+        seed_order(cursor, order)
+        key = seed_dispatch(cursor, order, revoked=revoked)
+        cursor.execute("UPDATE orders SET currency='USD' WHERE order_id=%s", (order,))
+        if existing:
+            cursor.execute(
+                "INSERT INTO refunds VALUES ('MOCK-RF-1043',%s,NULL,19900,'CNY','seed',UTC_TIMESTAMP(6))",
+                (order,),
+            )
+        result = asyncio.run(direct_submission(config, order, key))
+        assert (result['status'], result['reason']) == (status, reason), result
+        assert (result['refund']['refund_id'] if result['refund'] else None) == ('MOCK-RF-1043' if existing else None)
+        assert len(records(cursor, order)[1]) == int(existing)
+        results[order] = result
+    record({'case': 'legacy_order_fact_validation_precedence', 'results': results})
+
+
+def check_host_competition(config, cursor, log, record):
+    from implementations.refund import controlled_tools
+    from implementations.refund.dispatches import MySQLRefundDispatchService
+    from implementations.refund.execution import RefundExecution
+    from model.policy.evidence import PolicyCitation, PolicyEvidence
+    from model.policy.status import PolicyEntryType, PolicyEvidenceStatus
+    from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerification
+    from utils.database import create_mysql_engine
+    from utils.events import persist_event
+
+    settings = load_config(config)
+    directory = Path(settings.refund_policy_events_dir)
+    order = 'DEMO-1041'
+    seed_order(cursor, order)
+    engine = create_mysql_engine(settings.mysql)
+    active = track_open_transactions(engine)
+    matching = Event()
+    looked_up = Event()
+    send, lookup = controlled_tools.send_refund, controlled_tools.read_refund
+
+    def before_send(mcp, request, trace, **kwargs):
+        assert matching.wait(15)
+        return send(mcp, request, trace, **kwargs)
+
+    def before_lookup(mcp, request, trace):
+        result = lookup(mcp, request, trace)
+        assert result.status.value == 'not_found'
+        looked_up.set()
+        matching.set()
+        return result
+
+    receipt = PolicyCitation(event_id=str(uuid4()), document_id='demo-policy', version='1.0',
+                             clause_id='RF-003', entry_type=PolicyEntryType.POLICY, excerpt='正式条款')
+    events = [
+        RefundPolicyVerification(
+            trace_id=str(uuid4()), idempotency_key=str(uuid4()),
+            authorization=AuthorizedRefundIntent(order_id=order, consumer_id=CONSUMER_ID,
+                                                 session_id=seed_source(cursor, order), source_message_sequence=1),
+            evidence=PolicyEvidence(question=refund_request(order), query='已付未发货',
+                                    status=PolicyEvidenceStatus.SUFFICIENT, catalog_revision=1, citations=[receipt]),
+        )
+        for _ in range(2)
+    ]
+    try:
+        service = MySQLRefundDispatchService(engine)
+        executor = RefundExecution(service, settings, lambda *args, **kwargs: None)
+        for item in events:
+            persist_event(directory, item.idempotency_key, RefundEvent.POLICY_VERIFIED.value,
+                          **item.model_dump(mode='json'))
+        with (patch.object(controlled_tools, 'send_refund', before_send),
+              patch.object(controlled_tools, 'read_refund', before_lookup),
+              ThreadPoolExecutor(max_workers=2) as pool):
+            results = list(pool.map(executor.send, events))
+        assert looked_up.is_set()
+        assert {result.status for result in results} == {RefundOutcome.SIMULATED_SUCCEEDED, RefundOutcome.UNCONFIRMED}
+        stored, refunds = records(cursor, order)
+        assert len(stored) == len(refunds) == 1 and stored[0][1] == 'succeeded'
+        calls = [e for item in events for e in submit_calls(log, item.trace_id)]
+        assert len(calls) == 1 and calls[0]['idempotency_key'] == stored[0][0]
+        assert not active
+        record({'case': 'host_competing_reservations', 'statuses': sorted(r.status.value for r in results),
+                'write_calls': len(calls), 'database': [stored, refunds]})
+    finally:
+        engine.dispose()
 
 
 def main():
@@ -523,6 +794,8 @@ def main():
         events.mkdir()
         if args.investigation_probe:
             (path / 'investigation-probe').touch()
+        if not args.smoke and args.group in ('all', 'outcomes'):
+            (path / 'db-faults').touch()
         config = path / 'settings.json'
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
@@ -559,6 +832,10 @@ def main():
                     check_policy_and_storage_faults(config, cursor, log, record)
                 if not args.smoke and args.group in ('all', 'outcomes'):
                     check_outcomes(config, cursor, log, record)
+                    check_lock_contention(config, cursor, record)
+                    check_lookup_scope(config, cursor, record)
+                    check_legacy_order_facts(config, cursor, record)
+                    check_host_competition(config, cursor, log, record)
         finally:
             try:
                 if backend.client.has_collection(namespace):

@@ -6,10 +6,11 @@ from pydantic import TypeAdapter
 
 from config import load_config, use_config
 from implementations.policy.backend import open_policy_backend
-from implementations.policy.catalog import MySQLPolicyCatalog
+from implementations.policy.catalog import MySQLPolicyCatalog, initialize_policy_catalog
 from implementations.policy.publish import publish_policy
 from implementations.policy.source import read_policy_document
 from model.policy.catalog import PublisherId, QualificationConfirmation
+from utils.database import create_mysql_engine
 
 
 # 校验发布源和维护者资格确认，报告实际生效的目录修订。
@@ -38,12 +39,15 @@ def main() -> None:
     # endregion
 
     # region 初始化目录、独立发布并打印可核对的结构化结果
-    catalog = MySQLPolicyCatalog(policy.catalog_database, settings.mysql)
     try:
-        catalog.initialize()
-        result = publish_policy(document, publisher=publisher, qualification=args.qualification,
-                                catalog=catalog, open_backend=open_policy_backend,
-                                confirm_write_ended=args.confirm_write_ended)
+        initialize_policy_catalog(policy.catalog_database, settings.mysql)
+        engine = create_mysql_engine(settings.mysql, database=policy.catalog_database)
+        try:
+            result = publish_policy(document, publisher=publisher, qualification=args.qualification,
+                                    catalog=MySQLPolicyCatalog(engine), open_backend=open_policy_backend,
+                                    confirm_write_ended=args.confirm_write_ended)
+        finally:
+            engine.dispose()
     except ValueError as error:
         parser.exit(1, f'发布失败：{error}\n')
     except Exception as error:

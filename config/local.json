@@ -1,27 +1,26 @@
 {
   "mysql": {
-    "host": "127.0.0.1",
-    "port": 3306,
-    "user": "order_demo",
-    "password": "请在本地填写"
+    "host": "192.168.18.149",
+    "port": 30349,
+    "user": "root",
+    "password": "123456"
   },
   "mcp": {
     "url": "http://127.0.0.1:8765/mcp",
     "host": "127.0.0.1",
     "port": 8765,
-    "read_token": "请替换为至少32个ASCII字符的随机凭据",
+    "read_token": "w64FvABoC_EhjC3VJswhXWjhZhRqj-rMoitAAwLQASg",
     "write_token": null
   },
   "qwen": {
     "base_url": "http://192.168.18.53:30080/qwen3/v1",
-    "api_key": "not-used",
     "model": "Qwen/Qwen3-8B",
     "max_completion_tokens": 512,
     "timeout": 90
   },
   "policy": {
     "milvus_uri": "http://192.168.18.54:31953",
-    "milvus_token": "请在本地填写",
+    "milvus_token": "root:Milvus",
     "model_base": "http://192.168.18.53:30080"
   },
   "refund_policy_events_dir": null

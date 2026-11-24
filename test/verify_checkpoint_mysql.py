@@ -1,4 +1,5 @@
 """Verify synchronous checkpoint persistence in a disposable MySQL database."""
+import argparse
 import importlib.metadata as metadata
 import subprocess
 import sys
@@ -12,7 +13,8 @@ from langgraph.graph import END, START, StateGraph
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from model import connection_config
+from config import load_config
+from utils.mysql import connection_config
 
 TABLES = ('orders', 'refunds', 'refund_dispatches', 'conversation_sessions',
           'conversation_messages', 'conversation_summaries', 'consumer_preferences')
@@ -36,8 +38,8 @@ def config(thread):
     return {'configurable': {'thread_id': thread}}
 
 
-def worker(stage, database):
-    conn = pymysql.connect(**connection_config(), database=database, autocommit=True)
+def worker(stage, database, mysql):
+    conn = pymysql.connect(**connection_config(mysql), database=database, autocommit=True)
     try:
         saver = PyMySQLSaver(conn)
         app = graph(saver)
@@ -89,11 +91,19 @@ def worker(stage, database):
 
 
 def main():
-    if len(sys.argv) == 3:
-        worker(sys.argv[1], sys.argv[2])
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=Path, help='JSON 配置文件路径')
+    parser.add_argument('stage', nargs='?', choices=('write', 'resume', 'cleanup'))
+    parser.add_argument('database', nargs='?')
+    args = parser.parse_args()
+    mysql = load_config(args.config).mysql
+    if args.stage:
+        if not args.database:
+            parser.error('子进程需要指定隔离库')
+        worker(args.stage, args.database, mysql)
         return
     name = 'order_demo_checkpoint_test_' + uuid.uuid4().hex[:12]
-    conn = pymysql.connect(**connection_config(), autocommit=True)
+    conn = pymysql.connect(**connection_config(mysql), autocommit=True)
     created = False
     try:
         with conn.cursor() as cur:
@@ -115,8 +125,9 @@ def main():
             cur.execute("INSERT INTO consumer_preferences VALUES ('consumer','language','sentinel',UTC_TIMESTAMP(6))")
             cur.execute("INSERT INTO refund_dispatches (idempotency_key,order_id,session_id,source_message_sequence,status,trace_id,created_at,updated_at) VALUES ('dispatch','sentinel','session',1,'closed_no_refund','trace',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
             cur.execute("INSERT INTO refunds VALUES ('refund','sentinel',NULL,19900,'CNY','seed',UTC_TIMESTAMP(6))")
+        config_args = ['--config', str(args.config)] if args.config is not None else []
         for stage in ('write', 'resume', 'cleanup'):
-            subprocess.run([sys.executable, __file__, stage, name], check=True)
+            subprocess.run([sys.executable, __file__, *config_args, stage, name], check=True)
     finally:
         if created:
             with conn.cursor() as cur:

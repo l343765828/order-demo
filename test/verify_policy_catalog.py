@@ -3,7 +3,7 @@
 import argparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 import json
 from pathlib import Path
 from queue import Queue
@@ -16,25 +16,32 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pymysql
-from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
+from sqlalchemy import event
+from sqlalchemy.exc import DBAPIError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from config import load_config, use_config
 from config.demo import DemoPolicy
+from config.limits import PolicyCatalogTables
 from implementations.policy.backend import PolicyBackend
 from implementations.policy.catalog import MySQLPolicyCatalog, PolicyPublicationSession, PublicationConflict
 from implementations.policy.evidence import verify_policy_evidence
 from implementations.policy.publish import publish_policy
 from implementations.policy.source import SOURCE_PATH, read_policy_document
 from mcp_service.policy.search import search_policy
-from model import connection_config
-from model.policy.catalog import PolicyWriteState, PublicationStatus, QualificationConfirmation
+from utils.mysql import connection_config
+from model.policy.catalog import (
+    PolicyPublicationApproval, PolicyVersion, PolicyWriteState, PublicationStatus, QualificationConfirmation,
+)
 from model.policy.evidence import PolicyEvidence
 from model.policy.search import PolicySearchResult, SearchPolicyRequest
 from model.policy.status import PolicyEntryType, PolicySearchMode, PolicySearchStatus
+from utils.database import create_mysql_engine
 from utils.mcp_client import bind_mcp_tool, open_mcp_client
 from launch_with_config import application_command
+from order_mysql_fixture import isolated_order_database
+from verify_conversation_mysql import assert_transaction_ended
 from verify_order_cli import read_events
 from verify_policy_cli import server
 
@@ -73,8 +80,10 @@ def cli_publish(config, path, version, *, qualification='unchanged', expected=0)
 
 @contextmanager
 def host(config):
-    sessions = []
     output = Queue()
+    setup = subprocess.run(application_command('cli', config, '--init-checkpoints'), cwd=ROOT,
+                           capture_output=True, timeout=30)
+    assert setup.returncode == 0, 'failed to initialize isolated checkpoints'
     with tempfile.TemporaryFile() as log, subprocess.Popen(
         application_command('cli', config), cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=log, encoding='utf-8', bufsize=1,
@@ -87,8 +96,7 @@ def host(config):
         Thread(target=pump, daemon=True).start()
         try:
             session_line = output.get(timeout=45)
-            assert session_line.startswith('会话：'), session_line
-            sessions.append(session_line.split('：', 1)[1])
+            assert session_line and session_line.startswith('会话：'), session_line
 
             def turn(question, expected):
                 process.stdin.write(question + '\n')
@@ -109,11 +117,6 @@ def host(config):
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=15)
-            with pymysql.connect(database='order_demo', autocommit=True, **connection_config()) as db, db.cursor() as cursor:
-                for sid in sessions:
-                    PyMySQLSaver(db).delete_thread(sid)
-                    cursor.execute('DELETE FROM conversation_messages WHERE session_id = %s', (sid,))
-                    cursor.execute('DELETE FROM conversation_sessions WHERE session_id = %s', (sid,))
 
 
 async def check_receipts(settings, catalog, index, update, turn, evidence, probe):
@@ -166,10 +169,22 @@ async def check_receipts(settings, catalog, index, update, turn, evidence, probe
                          'receipts': [r.model_dump(mode='json') for r in (before, both, old, new, unknown)]})
 
 
-def check_faults(catalog, index, evidence):
+def check_faults(catalog, index, evidence, engine, cursor):
     partial = read_policy_document(source('3.0', old_clause=True), version='3.0')
     corrected = read_policy_document(source('3.0'), version='3.0')
     live_reads = []
+    connections = []
+
+    @event.listens_for(engine, 'begin')
+    def observe_transaction(connection):
+        connections.append(connection)
+
+    def check_write_boundary(target, expected):
+        connection = connections[-1]
+        assert_transaction_ended(connection)
+        cursor.execute(f'SELECT write_state FROM {PolicyCatalogTables.RELEASES} WHERE document_id=%s AND version=%s',
+                       (target.document_id, target.version))
+        assert cursor.fetchone() == (expected.value,)
 
     def check_live(expected_revision, expected_version):
         result = search_policy(QUESTION, PolicySearchMode.CONSULTATION, index, catalog=catalog)
@@ -179,11 +194,17 @@ def check_faults(catalog, index, evidence):
         live_reads.append(result.model_dump(mode='json'))
 
     def partial_write(entries):
+        check_write_boundary(partial.target, PolicyWriteState.PENDING)
         original_write(entries[:2])
         raise ConnectionError('injected after a partial write was acknowledged by Milvus')
 
+    def clear_without_transaction(target):
+        check_write_boundary(target, PolicyWriteState.PENDING)
+        return original_clear(target)
+
+    original_clear = index.clear_version
     original_write = index.publish
-    with patch.object(index, 'publish', partial_write):
+    with patch.object(index, 'clear_version', clear_without_transaction), patch.object(index, 'publish', partial_write):
         try:
             release(catalog, index, partial)
         except ConnectionError:
@@ -200,12 +221,22 @@ def check_faults(catalog, index, evidence):
         assert '--confirm-write-ended' in str(error)
     else:
         raise AssertionError('unconfirmed write was retried')
-    result = release(catalog, index, corrected, confirm_write_ended=True)
+    def rerank_without_transaction(*args, **kwargs):
+        check_write_boundary(corrected.target, PolicyWriteState.FINISHED)
+        return original_rerank(*args, **kwargs)
+
+    original_rerank = index.rerank
+    with patch.object(index, 'rerank', rerank_without_transaction):
+        result = release(catalog, index, corrected, confirm_write_ended=True)
     assert result.catalog_revision == 4 and set(item.clause_id for item in index.read_version(corrected.target)) == {'RF-003', 'FAQ-001'}
 
     invalid = read_policy_document(source('4.0', old_clause=True), version='4.0')
     valid = read_policy_document(source('4.0'), version='4.0')
-    with patch.object(index, 'read_version', return_value=[]):
+    def fail_readback(target):
+        check_write_boundary(target, PolicyWriteState.FINISHED)
+        return []
+
+    with patch.object(index, 'read_version', fail_readback):
         try:
             release(catalog, index, invalid)
         except ValueError as error:
@@ -274,7 +305,70 @@ def check_faults(catalog, index, evidence):
     evidence.append({'case': 'retry_and_conflict', 'old_revision_on_partial_write': 3, 'partial_rows': 2,
                      'retry_revision': 4, 'old_revision_on_readback_failure': 4, 'committed_without_receipt': 5,
                      'same_version_locked': True, 'conflict': outcomes, 'active_revision': 6,
-                     'queries_before_switch': live_reads})
+                     'queries_before_switch': live_reads,
+                     'transaction_ended_at': ['clear_version', 'publish', 'read_version', 'rerank'],
+                     'externally_visible_states': ['pending', 'finished']})
+    event.remove(engine, 'begin', observe_transaction)
+
+
+def check_mysql_boundaries(catalog, engine, cursor, namespace, evidence):
+    from hashlib import sha256
+
+    target = PolicyVersion(document_id='MYSQL-BOUNDARY-PROBE', version='1.0')
+    approval = PolicyPublicationApproval(source_digest='0' * 64, publisher='mysql-boundary-probe',
+                                         qualification=QualificationConfirmation.UNCHANGED)
+    key = sha256(f'policy:{namespace}:{target.document_id}:{target.version}'.encode()).hexdigest()
+
+    def lock_owner():
+        cursor.execute('SELECT IS_USED_LOCK(%s)', (key,))
+        return cursor.fetchone()[0]
+
+    with catalog.lock_version(target) as attempt:
+        connection = attempt.connection
+        owner = connection.connection.driver_connection.thread_id()
+        assert lock_owner() == owner
+        attempt.record_attempt(approval, write_state=PolicyWriteState.PENDING)
+        assert_transaction_ended(connection)
+        assert lock_owner() == owner
+        attempt.finish_write()
+        assert_transaction_ended(connection)
+        assert lock_owner() == owner
+        cursor.execute(f"CREATE TRIGGER probe_head_failure BEFORE UPDATE ON {PolicyCatalogTables.HEAD} "
+                       "FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected directory head failure'")
+        try:
+            try:
+                attempt.activate(None)
+            except DBAPIError as error:
+                assert error.orig.args[0] == 1644
+            else:
+                raise AssertionError('switch failed to roll back')
+        finally:
+            cursor.execute('DROP TRIGGER probe_head_failure')
+        assert_transaction_ended(connection)
+        assert attempt.release().activated_revision is None and catalog.snapshot().revision == 2
+    assert lock_owner() is None
+
+    def lose_unlock_receipt(_connection, _cursor, statement, parameters, _context, _many):
+        return ('SELECT 0', ()) if 'RELEASE_LOCK' in statement else (statement, parameters)
+
+    event.listen(engine, 'before_cursor_execute', lose_unlock_receipt, retval=True)
+    try:
+        with catalog.lock_version(target) as attempt:
+            discarded = lock_owner()
+            assert discarded == attempt.connection.connection.driver_connection.thread_id()
+    finally:
+        event.remove(engine, 'before_cursor_execute', lose_unlock_receipt)
+    cursor.execute('SELECT GET_LOCK(%s, 2)', (key,))
+    assert cursor.fetchone() == (1,)
+    cursor.execute('SELECT RELEASE_LOCK(%s)', (key,))
+    assert cursor.fetchone() == (1,)
+    with catalog.lock_version(target) as attempt:
+        assert lock_owner() != discarded
+        assert attempt.release().write_state is PolicyWriteState.FINISHED
+    assert lock_owner() is None
+    evidence.append({'case': 'mysql_boundaries', 'same_connection_across_transactions': owner,
+                     'atomic_switch_rolled_back': True, 'mysql_error': 1644, 'discarded_connection': discarded,
+                     'lock_acquired_after_discard': True})
 
 
 def main():
@@ -284,9 +378,9 @@ def main():
     args = parser.parse_args()
     settings = json.loads(args.config.read_text(encoding='utf-8'))
     use_config(args.config)
-    namespace = 'order_demo_p16_' + uuid4().hex[:12]
+    namespace = 'order_demo_policy05_' + uuid4().hex[:12]
     evidence = []
-    with tempfile.TemporaryDirectory() as folder, pymysql.connect(
+    with isolated_order_database(args.config) as (order_config, _), tempfile.TemporaryDirectory() as folder, pymysql.connect(
         autocommit=True, **connection_config(),
     ) as db, db.cursor() as cursor:
         cursor.execute('SELECT VERSION()')
@@ -295,15 +389,27 @@ def main():
         assert version == '8.0.46'
         cursor.execute(f'CREATE DATABASE `{namespace}` CHARACTER SET utf8mb4')
         try:
+            db.select_db(namespace)
+            settings['mysql']['database'] = load_config(order_config).mysql.database
             settings['policy'].update(catalog_database=namespace, milvus_collection=namespace)
             root_config = Path(folder) / 'publisher.json'
             root_config.write_text(json.dumps(settings), encoding='utf-8')
             use_config(root_config)
-            index = PolicyBackend()
-            try:
-                catalog = MySQLPolicyCatalog(namespace, load_config(root_config).mysql)
+            with ExitStack() as resources:
+                engine = create_mysql_engine(load_config(root_config).mysql, database=namespace)
+                resources.callback(engine.dispose)
+                catalog = MySQLPolicyCatalog(engine)
+                index = PolicyBackend()
+                resources.callback(index.close)
+
+                def remove_collection():
+                    if index.client.has_collection(namespace):
+                        index.client.drop_collection(namespace)
+                    assert not index.client.has_collection(namespace)
+
+                resources.callback(remove_collection)
                 info = {'case': 'environment', 'mysql': version, 'milvus': index.client.get_server_version(),
-                        'isolated_namespace': namespace}
+                        'isolated_namespace': namespace, 'isolated_order_database': settings['mysql']['database']}
                 evidence.append(info)
                 print(info, flush=True)
                 first = cli_publish(root_config, SOURCE_PATH, DemoPolicy.BASELINE_VERSION)
@@ -313,6 +419,15 @@ def main():
                 assert (first['catalog_revision'], second['catalog_revision']) == (1, 2)
                 evidence.append({'case': 'initial_publications', 'results': [first, second]})
                 print('first two documents activated', flush=True)
+                check_mysql_boundaries(catalog, engine, cursor, namespace, evidence)
+                for options in ([], ['--expect-failure']):
+                    result = subprocess.run(
+                        [sys.executable, '-X', 'utf8', str(ROOT / 'test/verify_policy_mcp.py'), '--config',
+                         str(root_config), *options], cwd=ROOT, capture_output=True, encoding='utf-8', timeout=140,
+                    )
+                    assert result.returncode == 0, result.stderr
+                    evidence.append({'case': 'standalone_mcp', 'options': options, 'output': result.stdout.splitlines()})
+                print('standalone MCP success and unavailable Milvus verified', flush=True)
                 update = read_policy_document(source('2.0'), version='2.0')
                 probe = Path(folder) / 'probe'
                 probe.mkdir()
@@ -346,7 +461,7 @@ def main():
                     evidence.append({'case': 'host_tool_contract', 'pid': host_pid, 'mcp_events': receipts,
                                      'verified_citations': citations})
                 print('same Host instance, MCP receipts and pinned supplement verified', flush=True)
-                check_faults(catalog, index, evidence)
+                check_faults(catalog, index, evidence, engine, cursor)
                 blocked = read_policy_document(source('7.0'), version='7.0')
                 supplemental.write_text(source('7.0'), encoding='utf-8')
                 failure = cli_publish(root_config, supplemental, '7.0', qualification='changed', expected=1)
@@ -360,15 +475,11 @@ def main():
                 evidence.append({'case': 'qualification_guard', 'error': failure, 'reclassification': reclassified,
                                  'record': record.model_dump(mode='json')})
                 print('retry, concurrent conflict and qualification guard verified', flush=True)
-            finally:
-                try:
-                    if index.client.has_collection(namespace):
-                        index.client.drop_collection(namespace)
-                    assert not index.client.has_collection(namespace)
-                finally:
-                    index.close()
         finally:
             cursor.execute(f'DROP DATABASE `{namespace}`')
+            cursor.execute('SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s', (namespace,))
+            assert cursor.fetchone() == (0,)
+            evidence.append({'case': 'catalog_database_removed', 'namespace': namespace})
             args.evidence.write_text(''.join(json.dumps(item, ensure_ascii=False) + '\n' for item in evidence), encoding='utf-8')
 
 

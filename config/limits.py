@@ -21,6 +21,17 @@ class ConnectionLimits:
     MCP_TOKEN_MIN_CHARS: Final[int] = 32  # MCP 读取及执行凭据的最小字符数。
     REFUND_CALL_SECONDS: Final[int] = 15  # 固定退款读写工具单次调用超时秒数。
     MYSQL_CONNECT_SECONDS: Final[int] = 5  # MySQL 连接超时秒数。
+    MYSQL_READ_SECONDS: Final[int] = 5  # MySQL 等待读取数据库响应的秒数。
+    MYSQL_WRITE_SECONDS: Final[int] = 5  # MySQL 等待发送数据库请求的秒数。
+    MYSQL_POOL_CONNECTIONS: Final[int] = 5  # 连接池中的常驻连接容量。
+    MYSQL_POOL_OVERFLOW_CONNECTIONS: Final[int] = 0  # 连接池用满时允许的额外连接数。
+    MYSQL_POOL_WAIT_SECONDS: Final[int] = 5  # 等待池中可用连接的秒数。
+    MYSQL_POOL_RECYCLE_SECONDS: Final[int] = 1800  # 重新借用连接时允许的最长连接存续秒数。
+    MYSQL_CONVERSATION_LOCK_WAIT_SECONDS: Final[int] = 0  # 同一会话已被占用时立即拒绝。
+    MYSQL_POLICY_LOCK_WAIT_SECONDS: Final[int] = 0  # 同一文档版本已在发布时立即拒绝。
+    MYSQL_CHARSET: Final[str] = "utf8mb4"  # MySQL 连线使用的 UTF-8 字符集。
+    MYSQL_DATABASE_COLLATION: Final[str] = "utf8mb4_0900_ai_ci"  # 演示库初始化使用的排序规则。
+    MYSQL_UTC_INIT_COMMAND: Final[str] = "SET time_zone = '+00:00'"  # 新建 MySQL 会话时统一使用 UTC。
     MCP_HTTP_SECONDS: Final[int] = 90  # MCP HTTP 传输超时秒数。
     POLICY_SESSION_SECONDS: Final[int] = 90  # 政策调查会话读取超时秒数。
     POLICY_CALL_SECONDS: Final[int] = 60  # 政策调查工具调用超时秒数。
@@ -34,19 +45,26 @@ class McpCorrelationField(StrEnum):
     TOOL_EVENT_ID = "tool_event_id"  # 标识同一轮内的单次工具调用。
 
 
-# 声明模拟退款业务读写共用的持久化表名。
+# 声明模拟退款业务读写共用的持久化名称。
 class RefundTables:
     ORDERS: Final = "orders"  # 本人订单及实付事实。
     REFUNDS: Final = "refunds"  # 已确认的模拟退款。
     DISPATCHES: Final = "refund_dispatches"  # Host 保存的授权和提交状态。
     SESSIONS: Final = "conversation_sessions"  # 会话归属。
     MESSAGES: Final = "conversation_messages"  # 授权来源原文。
+    DISPATCH_REFUND_FOREIGN_KEY: Final = "fk_dispatch_refund"  # 确保提交只引用同订单的退款。
+
+
+# 声明退款会话持久化使用的固定标识。
+class ConversationStorage:
+    LOCK_PREFIX: Final[str] = "order_demo:conversation:"  # 拼接会话 UUID，保持原 MySQL 命名锁。
 
 
 # MySQL 政策发布目录使用的表名，建表和读写操作共用。
 class PolicyCatalogTables:
     HEAD: Final[str] = 'policy_catalog_head'  # 保存对新调查开放的最新修订。
     RELEASES: Final[str] = 'policy_releases'  # 保存每份文档版本的发布历史。
+    VERSION_LOCK_NAMESPACE: Final[str] = 'policy'  # 兼容原发布入口持有的版本锁。
 
 
 # 统一政策向量存储和检索使用的集合名称与约束。

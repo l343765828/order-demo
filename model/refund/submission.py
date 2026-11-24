@@ -159,3 +159,9 @@ class RefundDispatch(SubmitMockRefundRequest):
     updated_at: datetime
     # MySQL 生成列，仅未决状态下有值，由唯一约束拦截新提交。
     blocking_order_id: OrderQueryId | None
+
+
+# 未决提交查询用的数据库投影。
+class RefundDispatchKeyRow(StrictModel):
+    # 当前仍拦截该订单办理的提交键。
+    idempotency_key: RefundIdentifier

@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -14,12 +15,11 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
-from pydantic import SecretStr
 
 from protocol_probe_contracts import EchoInput, EchoResult
 from verify_mcp_protocol import bind_echo, probe_process
 from utils.mcp_client import controlled_mcp_http
-from utils.qwen_client import QwenChatOpenAI
+from utils.qwen_client import create_qwen_client
 from config import load_config
 
 
@@ -29,6 +29,7 @@ async def run(url: str, log: Path) -> None:
     returned_ids: set[str] = set()
 
     async def inspect_request(request: httpx.Request) -> None:
+        assert "Authorization" not in request.headers
         messages = json.loads(request.content)["messages"]
         for message in messages:
             call_id = message.get("tool_call_id")
@@ -60,18 +61,7 @@ async def run(url: str, log: Path) -> None:
             observations[call_id] = data
             return data.model_dump_json()
 
-        model = QwenChatOpenAI(
-            http_async_client=http,
-            model="Qwen/Qwen3-8B",
-            base_url=load_config().qwen.base_url,
-            api_key=SecretStr(load_config().qwen.api_key),
-            temperature=0,
-            max_completion_tokens=512,
-            max_retries=0,
-            timeout=120,
-            http_socket_options=(),
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
+        model = create_qwen_client(replace(load_config().qwen, timeout=120), http_async_client=http)
         agent = create_deep_agent(
             model=model,
             system_prompt="Delegate the user request to echo-worker using task. Return the worker's answer.",

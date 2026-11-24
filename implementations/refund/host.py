@@ -6,11 +6,13 @@ import httpx
 
 from config import load_config
 from config.demo import CONSUMER_ID
-from implementations.refund.conversations import create_conversation, open_conversation
+from implementations.refund.conversations import MySQLConversationService
 from implementations.refund.decision import QwenDecider
 from implementations.refund.execution import RefundExecution
 from implementations.refund.investigation import execute_order
-from implementations.refund.preferences import MySQLPreferences, preference_reply
+from implementations.refund.preferences import preference_reply
+from interfaces.refund.preference import ManagePreferences
+from interfaces.refund.storage import RefundDispatchService
 from model.policy.status import PolicySearchMode
 from model.refund.flow import ExchangeMessage, InvestigationStep, OrderToolEvent, OrderTurn, PolicyStep, PolicyToolEvent
 from model.refund.submission import RefundTurnSource
@@ -21,12 +23,15 @@ from workflows.refund import build_graph, load_refund_state, run_refund_turn
 
 
 # 载入或创建消费者会话，处理交互消息并保存原文与检查点。
-def run_cli(args, pool, saver, http: httpx.Client) -> int:
+def run_cli(
+    args, saver, http: httpx.Client, *,
+    conversations: MySQLConversationService, dispatches: RefundDispatchService, preferences: ManagePreferences,
+) -> int:
 
     # region 创建模型客户端并确定会话编号
     settings = load_config()
     model = create_qwen_client(settings.qwen, http_client=http)
-    session_id = args.session or create_conversation(pool, CONSUMER_ID)
+    session_id = args.session or conversations.create(CONSUMER_ID)
     trace_id: str | None = None
     live_trace: str | None = None
     # endregion
@@ -63,12 +68,12 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
         # endregion
 
     graph = build_graph(QwenDecider(model, emit), investigate, emit, saver, search=search,
-                        refund=RefundExecution(pool, settings, emit), is_live=is_live,
-                        preferences=MySQLPreferences(pool, CONSUMER_ID))
+                        refund=RefundExecution(dispatches, settings, emit), is_live=is_live,
+                        preferences=preferences)
     # endregion
 
     # region 校验会话归属，恢复历史和检查点并显示会话编号
-    with open_conversation(pool, session_id, CONSUMER_ID) as conversation:
+    with conversations.open(session_id, CONSUMER_ID) as conversation:
         session_id = conversation.session_id
         restored, pending_nodes = load_refund_state(graph, session_id)
         trace_id = restored.trace_id if restored else None
@@ -98,7 +103,7 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
         if message.strip():
 
             # region 收到非空消息时保存原文、运行调查并记录和展示回复
-            with open_conversation(pool, session_id, CONSUMER_ID) as conversation:
+            with conversations.open(session_id, CONSUMER_ID) as conversation:
                 trace_id = str(uuid4())
                 sequence = conversation.append(ExchangeMessage(role=ConversationRole.USER, content=message))
                 turn = OrderTurn(history=conversation.history(), trace_id=trace_id, refund_source=RefundTurnSource(

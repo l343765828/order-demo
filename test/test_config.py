@@ -13,21 +13,22 @@ def local_settings():
     data = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
     data["mysql"]["password"] = "test-password"
     data["mcp"]["read_token"] = "x" * 32
-    data["qwen"]["api_key"] = "test-key"
     return data
 
 
-def test_load_config_from_json(tmp_path):
+@pytest.mark.parametrize("legacy_fields", [{}, {"api_key": "legacy-test-value"}])
+def test_load_config_from_json(tmp_path, legacy_fields):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({
         "mysql": {"host": "db", "port": 3306, "user": "demo", "password": "secret"},
         "mcp": {"url": "http://localhost:8765/mcp", "port": 8765, "read_token": "x" * 32},
-        "qwen": {"base_url": "http://localhost:8000/v1", "api_key": "test"},
+        "qwen": {"base_url": "http://localhost:8000/v1", **legacy_fields},
     }), encoding="utf-8")
     config = load_config(path)
     assert config.mysql.host == "db"
     assert config.mcp.read_token == "x" * 32
     assert config.qwen.base_url.endswith("/v1")
+    assert not hasattr(config.qwen, "api_key")
 
 
 def test_invalid_config_does_not_expose_secret(tmp_path):
@@ -43,7 +44,7 @@ def test_policy_settings_are_loaded_from_json(tmp_path, monkeypatch):
     data = {
         "mysql": {"host": "db", "port": 3306, "user": "demo", "password": "secret"},
         "mcp": {"url": "http://localhost:8765/mcp", "port": 8765, "read_token": "x" * 32},
-        "qwen": {"base_url": "http://localhost:8000/v1", "api_key": "test"},
+        "qwen": {"base_url": "http://localhost:8000/v1"},
         "policy": {"milvus_uri": "http://db:19530", "milvus_token": "private", "model_base": "http://model:8000"},
     }
     path.write_text(json.dumps(data), encoding="utf-8")

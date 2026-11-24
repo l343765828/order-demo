@@ -15,6 +15,7 @@ from model.policy.status import PolicySearchMode, PolicySearchStatus
 from config import DEFAULT_PATH
 from utils.mcp_client import bind_mcp_tool, open_mcp_client
 from implementations.policy.tool import make_policy_tool
+from launch_with_config import application_command
 
 
 async def verify(url, token, expect_failure):
@@ -22,6 +23,12 @@ async def verify(url, token, expect_failure):
         response = await http.post(url, json={})
         assert response.status_code == 401
     async with open_mcp_client(url, token=token, read_timeout_seconds=90) as client:
+        tools = (await client.list_tools()).tools
+        policy, = [tool for tool in tools if tool.name == 'search_policy']
+        assert policy.annotations.read_only_hint
+        assert set(policy.input_schema['properties']) == {'query', 'mode', 'catalog_revision'}
+        assert set(policy.input_schema['required']) == {'query', 'mode'}
+        assert set(policy.output_schema['properties']) == {'status', 'event_id', 'candidates', 'catalog_revision'}
         tool = await bind_mcp_tool(client, 'search_policy', PolicySearchResult.from_mcp)
         if expect_failure:
             result = await tool.call(SearchPolicyRequest(query='退款', mode=PolicySearchMode.FORMAL), timeout=60)
@@ -47,12 +54,14 @@ def main():
         sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
     with tempfile.TemporaryDirectory() as folder:
         settings = json.loads(Path(args.config).read_text(encoding='utf-8'))
-        settings['mcp']['read_token'] = 'x' * 40
+        url = f'http://127.0.0.1:{port}/mcp'
+        settings['mcp'].update(host='127.0.0.1', port=port, url=url, read_token='x' * 40)
         if args.expect_failure:
             settings['policy']['milvus_uri'] = 'http://127.0.0.1:1'
         path = Path(folder) / 'settings.json'
         path.write_text(json.dumps(settings), encoding='utf-8')
-        process = subprocess.Popen([sys.executable, str(Path(__file__).with_name('policy_probe_server.py')), str(port), str(path)])
+        executable, *command = application_command('mcp_service.server', path)
+        process = subprocess.Popen([executable, '-X', 'utf8', *command])
         try:
             deadline = time.monotonic() + 20
             while True:
@@ -62,7 +71,7 @@ def main():
                 except OSError:
                     if time.monotonic() > deadline: raise TimeoutError('MCP process failed to start')
                     time.sleep(0.1)
-            asyncio.run(verify(f'http://127.0.0.1:{port}/mcp', 'x' * 40, args.expect_failure))
+            asyncio.run(verify(url, 'x' * 40, args.expect_failure))
         finally:
             process.terminate(); process.wait(timeout=10)
 

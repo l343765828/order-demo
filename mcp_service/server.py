@@ -1,6 +1,8 @@
 """独立 Streamable HTTP 退款业务服务。"""
 
 import argparse
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from enum import StrEnum
 from hmac import compare_digest
 from typing import Any
@@ -15,16 +17,18 @@ from pydantic import ValidationError
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.types import Receive, Scope, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from config import load_config
+from config import AppConfig, load_config
 from config.demo import CONSUMER_ID
 from config.limits import McpCorrelationField, PolicyLimits
+from implementations.orders.query import MySQLOrderQueryService
 from implementations.policy.catalog import MySQLPolicyCatalog
-from implementations.refund.transactions import lookup_refund, submit_refund
-from mcp_service.orders.query import query_order
+from implementations.refund.transactions import MySQLRefundTransactionService
+from interfaces.orders.query import OrderQueryService
+from interfaces.policy.catalog import PolicyCatalogReader
+from interfaces.refund.storage import RefundTransactionService
 from mcp_service.policy import search
-from model import create_pool
 from model.orders.query import GetOrderRequest, OrderQueryId
 from model.policy.search import PolicyCatalogRevision, PolicyQueryText, PolicySearchResult, PolicySearchScope
 from model.policy.status import PolicySearchStatus
@@ -32,6 +36,7 @@ from model.refund.tool_name import McpToolName
 from model.refund.submission import (
     GetRefundResultRequest, RefundIdentifier, RefundLookupResult, RefundResult, SubmitMockRefundRequest,
 )
+from utils.database import create_mysql_engine
 from utils.events import log_event
 
 
@@ -118,7 +123,10 @@ class _OrderMcpServer(MCPServer):
 
 
 # 创建退款 MCP 应用，分别认证调查及受控执行凭据。
-def make_app(pool, token: str, write_token: str | None = None):
+def make_app(
+    token: str, write_token: str | None = None, *,
+    order_service: OrderQueryService, refund_service: RefundTransactionService, policy_catalog: PolicyCatalogReader,
+) -> ASGIApp:
 
     # region 初始化 MCP 服务和只读工具注解
     server = _OrderMcpServer("order-demo")
@@ -138,8 +146,10 @@ def make_app(pool, token: str, write_token: str | None = None):
     ) -> RefundLookupResult:
 
         # region 读取真实原退款并记录关联事件
-        result = lookup_refund(pool, GetRefundResultRequest(order_id=order_id, idempotency_key=idempotency_key),
-                               CONSUMER_ID)
+        result = refund_service.lookup_refund(
+            GetRefundResultRequest.model_construct(order_id=order_id, idempotency_key=idempotency_key),
+            authenticated_consumer_id=CONSUMER_ID,
+        )
         _log_tool_event(_McpEvent.GET_REFUND_RESULT, ctx.request_context,
                         order_id=order_id, idempotency_key=idempotency_key, status=result.status.value)
         return result
@@ -165,8 +175,10 @@ def make_app(pool, token: str, write_token: str | None = None):
         # endregion
 
         # region 执行退款事务并记录结果供跨进程对账
-        result = submit_refund(pool, SubmitMockRefundRequest(order_id=order_id, idempotency_key=idempotency_key),
-                               CONSUMER_ID)
+        result = refund_service.submit_refund(
+            SubmitMockRefundRequest.model_construct(order_id=order_id, idempotency_key=idempotency_key),
+            authenticated_consumer_id=CONSUMER_ID,
+        )
         _log_tool_event(_McpEvent.SUBMIT_REFUND, context, order_id=order_id,
                         idempotency_key=idempotency_key, status=result.status.value)
         return result
@@ -181,7 +193,9 @@ def make_app(pool, token: str, write_token: str | None = None):
     def get_order(order_id: OrderQueryId, ctx: Context) -> types.CallToolResult:
 
         # region 查询固定演示消费者的订单并返回结构化结果
-        result = query_order(pool, GetOrderRequest.model_construct(order_id=order_id), CONSUMER_ID)
+        result = order_service.query_order(
+            GetOrderRequest.model_construct(order_id=order_id), authenticated_consumer_id=CONSUMER_ID,
+        )
         _log_tool_event(_McpEvent.GET_ORDER, ctx.request_context, status=result.status.value)
         return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
         # endregion
@@ -201,12 +215,9 @@ def make_app(pool, token: str, write_token: str | None = None):
         from implementations.policy.backend import open_policy_backend
 
         try:
-            settings = load_config()
-            policy = settings.policy
-            database = policy.catalog_database if policy is not None else PolicyLimits.CATALOG_DATABASE
-            catalog = MySQLPolicyCatalog(database, settings.mysql)
             with open_policy_backend() as backend:
-                result = search.search_policy(query, mode, backend, catalog=catalog, catalog_revision=catalog_revision)
+                result = search.search_policy(query, mode, backend, catalog=policy_catalog,
+                                              catalog_revision=catalog_revision)
         except Exception:
 
             # region 后端发生异常时生成失败结果和空候选
@@ -264,13 +275,45 @@ def make_app(pool, token: str, write_token: str | None = None):
     # endregion
 
 
-if __name__ == "__main__":
+# 根据启动时的配置组装业务和政策目录 Service，退出时释放连接池。
+@contextmanager
+def open_app(settings: AppConfig) -> Iterator[ASGIApp]:
+
+    # region 按数据库分配连接池并为 MCP 工具注入 Service
+    with ExitStack() as resources:
+        engine = create_mysql_engine(settings.mysql)
+        resources.callback(engine.dispose)
+        database = settings.policy.catalog_database if settings.policy is not None else PolicyLimits.CATALOG_DATABASE
+        catalog_engine = engine
+        if database != settings.mysql.database:
+
+            # region 政策目录配置了独立库时使用该库的连接池
+            catalog_engine = create_mysql_engine(settings.mysql, database=database)
+            resources.callback(catalog_engine.dispose)
+            # endregion
+
+        yield make_app(
+            settings.mcp.read_token, settings.mcp.write_token, order_service=MySQLOrderQueryService(engine),
+            refund_service=MySQLRefundTransactionService(engine), policy_catalog=MySQLPolicyCatalog(catalog_engine),
+        )
+    # endregion
+
+
+# 加载应用配置并运行 MCP 服务，退出时释放业务和目录连接池。
+def main() -> None:
+
+    # region 解析启动参数并读取 JSON 配置
     parser = argparse.ArgumentParser(description="订单 MCP 服务")
     parser.parse_args()
-    mcp_config = load_config().mcp
-    pool = create_pool()
-    try:
-        uvicorn.run(make_app(pool, mcp_config.read_token, mcp_config.write_token), host=mcp_config.host,
-                    port=mcp_config.port, access_log=False, log_level="warning")
-    finally:
-        pool.close()
+    settings = load_config()
+    mcp_config = settings.mcp
+    # endregion
+
+    # region 组装工具依赖并运行服务，退出时释放连接池
+    with open_app(settings) as app:
+        uvicorn.run(app, host=mcp_config.host, port=mcp_config.port, access_log=False, log_level="warning")
+    # endregion
+
+
+if __name__ == "__main__":
+    main()

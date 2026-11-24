@@ -1,6 +1,7 @@
 """Cross-process acceptance tests for the MCP client boundary."""
 import asyncio
 import json
+from threading import get_ident
 import uuid
 
 import httpx2
@@ -129,30 +130,56 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
     candidate = PolicyCandidate(document_id="refund", title="Refund policy", version="1.0", clause_id="1",
                                 entry_type=PolicyEntryType.POLICY, text="Policy text")
 
-    def query_order(pool, request, consumer):
-        calls.append((request, consumer))
-        return OrderQueryResult(status=OrderQueryStatus.FOUND, order=details)
+    class OrderService:
+        def query_order(self, request, *, authenticated_consumer_id):
+            assert get_ident() != http_request_thread
+            calls.append((request, authenticated_consumer_id))
+            return OrderQueryResult(status=OrderQueryStatus.FOUND, order=details)
 
     class Backend:
         def close(self):
             calls.append("closed")
 
     policy_backend = Backend()
+    policy_catalog = object()
 
     def search_policy(query, mode, connection, *, catalog, catalog_revision):
         assert connection is policy_backend
+        assert catalog is policy_catalog
         calls.append((query, mode, catalog_revision))
         return PolicySearchResult(status=PolicySearchStatus.OK, event_id=policy_event, candidates=[candidate],
                                   catalog_revision=catalog_revision)
 
-    monkeypatch.setattr(server, "query_order", query_order)
-    monkeypatch.setattr(server, "load_config", lambda: type("Settings", (), {"policy": None, "mysql": None})())
-    monkeypatch.setattr(server, "MySQLPolicyCatalog", lambda database, mysql: object())
     monkeypatch.setattr(server.search, "search_policy", search_policy)
     monkeypatch.setattr(backend, "PolicyBackend", lambda: policy_backend)
     headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25"}
 
-    with TestClient(server.make_app(None, "test-token"), base_url="http://127.0.0.1:8000", headers=headers) as http:
+    from interfaces.refund.storage import RefundTransactionService
+    from model.refund.status import RefundLookupStatus, RefundOutcome, RefundReason
+    from model.refund.submission import GetRefundResultRequest, RefundLookupResult, RefundResult, SubmitMockRefundRequest
+
+    class RefundService(RefundTransactionService):
+        def lookup_refund(self, request, *, authenticated_consumer_id):
+            assert get_ident() != http_request_thread
+            calls.append((request, authenticated_consumer_id))
+            return RefundLookupResult(status=RefundLookupStatus.NOT_FOUND)
+
+        def submit_refund(self, request, *, authenticated_consumer_id):
+            assert get_ident() != http_request_thread
+            calls.append((request, authenticated_consumer_id))
+            return RefundResult(status=RefundOutcome.DENIED, reason=RefundReason.INVALID_DISPATCH)
+
+    app = server.make_app("test-token", "write-token", order_service=OrderService(), refund_service=RefundService(),
+                          policy_catalog=policy_catalog)
+    http_request_thread = None
+
+    async def observe_asgi_thread(scope, receive, send):
+        nonlocal http_request_thread
+        if scope['type'] == 'http':
+            http_request_thread = get_ident()
+        await app(scope, receive, send)
+
+    with TestClient(observe_asgi_thread, base_url="http://127.0.0.1:8000", headers=headers) as http:
         assert http.post("/mcp", json={}).status_code == 401
         http.headers["Authorization"] = "Bearer test-token"
 
@@ -175,6 +202,8 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
         }
         assert set(tools["submit_mock_refund"]["inputSchema"]["properties"]) == {"order_id", "idempotency_key"}
         assert set(tools["get_refund_result"]["inputSchema"]["properties"]) == {"order_id", "idempotency_key"}
+        assert set(tools["submit_mock_refund"]["outputSchema"]["properties"]) == {"status", "refund", "reason"}
+        assert set(tools["get_refund_result"]["outputSchema"]["properties"]) == {"status", "refund"}
         assert "outputSchema" not in tools["get_order"]
 
         for name, arguments in (
@@ -207,11 +236,28 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
         assert policy_result.event_id == policy_event and policy_result.candidates == [candidate]
         assert policy_result.catalog_revision == 7
         assert policy_result.candidates[0].entry_type is PolicyEntryType.POLICY
+        key = "verification-key"
+        tool_event = str(uuid.uuid4())
+        arguments = {"order_id": "DEMO-1001", "idempotency_key": key, "consumer_id": "DEMO-USER-02"}
+        meta = {"trace_id": trace, "tool_event_id": tool_event}
+        lookup = request("tools/call", {"name": "get_refund_result", "arguments": arguments, "_meta": meta}, 4)
+        assert RefundLookupResult.model_validate(lookup["structuredContent"]).status is RefundLookupStatus.NOT_FOUND
+        http.headers["Authorization"] = "Bearer write-token"
+        submission = request("tools/call", {"name": "submit_mock_refund", "arguments": arguments, "_meta": meta}, 5)
+        assert RefundResult.model_validate(submission["structuredContent"]).reason is RefundReason.INVALID_DISPATCH
 
-    assert calls == [(GetOrderRequest(order_id="DEMO-1001"), CONSUMER_ID), ("refund", PolicySearchMode.FORMAL, 7), "closed"]
+    assert calls == [
+        (GetOrderRequest(order_id="DEMO-1001"), CONSUMER_ID), ("refund", PolicySearchMode.FORMAL, 7), "closed",
+        (GetRefundResultRequest(order_id="DEMO-1001", idempotency_key=key), CONSUMER_ID),
+        (SubmitMockRefundRequest(order_id="DEMO-1001", idempotency_key=key), CONSUMER_ID),
+    ]
     events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")]
     assert [event["reason"] for event in events if event["event"] == "mcp_tool_rejected"] == [
         "bad_arguments", "bad_arguments", "unknown_tool", "write_forbidden",
     ]
     order_event, = [event for event in events if event["event"] == "mcp_get_order"]
     assert order_event["trace_id"] == trace and order_event["mcp_request_id"] == 2
+    for event_name, request_id in [("mcp_get_refund_result", 4), ("mcp_submit_mock_refund", 5)]:
+        event, = [event for event in events if event["event"] == event_name]
+        assert event["trace_id"] == trace and event["tool_event_id"] == tool_event
+        assert (event["mcp_request_id"], event["order_id"], event["idempotency_key"]) == (request_id, "DEMO-1001", key)

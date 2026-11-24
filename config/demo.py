@@ -13,6 +13,18 @@ CONSUMER_PREFERENCES_TABLE: Final = "consumer_preferences"
 MOCK_REFUND_ID_PREFIX: Final = "MOCK-RF-"
 
 
+# 保存演示种子的固定业务事实，金额单位为人民币分。
+class DemoSeed:
+    CURRENCY: Final = "CNY"  # 演示订单与种子退款的币种。
+    PAID_AMOUNT_FEN: Final = 19900
+    UNPAID_AMOUNT_FEN: Final = 0
+    REFUNDED_AMOUNT_FEN: Final = 8800
+    REFUND_ID: Final = "MOCK-RF-1003"
+    SHIPPED_AMOUNT_FEN: Final = 29900
+    OTHER_CONSUMER_ID: Final = "DEMO-USER-02"  # 归属隔离样本。
+    OTHER_AMOUNT_FEN: Final = 5900
+
+
 # 定义订单资格所依据的演示退款政策及升级前的发布基线。
 class DemoPolicy:
     DOCUMENT_ID: Final = "DEMO-REFUND-POLICY"  # 订单资格所依据的演示政策文档编号。

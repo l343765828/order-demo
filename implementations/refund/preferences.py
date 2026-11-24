@@ -1,77 +1,62 @@
 """Host 直接管理 MySQL 中的消费者当前偏好。"""
 
-import pymysql
-from dbutils.pooled_db import PooledDB
 from pydantic import ValidationError
+from sqlalchemy import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
-from config.demo import CONSUMER_PREFERENCES_TABLE
 from interfaces.refund.preference import ManagePreferences
 from model.refund.preference import (
-    ConsumerPreference, DeletePreference, ListPreferences, PreferenceAction, PreferenceCommand,
+    DeletePreference, ListPreferences, PreferenceAction, PreferenceCommand,
     PreferenceKey, PreferenceResult, PreferenceStatus, ResponseDetail, SetPreference,
 )
-from utils.mysql import pooled_mysql_connection
+from repositories.preference_repository import delete_preference, get_preference, save_preference
 
 
 # 按可信消费者限定所有读写，命令不携带消费者编号。
 class MySQLPreferences(ManagePreferences):
-    # 接收 Host 创建的 MySQL 连接池和已确认的消费者编号。
-    def __init__(self, pool: PooledDB, consumer_id: str) -> None:
+    # 接收 CLI 复用的 MySQL Engine 和可信消费者编号。
+    def __init__(self, engine: Engine, *, consumer_id: str) -> None:
 
-        # region 绑定消费者身份和连接池
-        self.pool = pool
-        self.consumer_id = consumer_id
+        # region 绑定消费者身份和业务连接来源
+        self._engine = engine
+        self._consumer_id = consumer_id
         # endregion
 
     # 执行查看、设置或删除，只有读到记录或确认提交后才返回相应成功状态。
     def __call__(self, command: PreferenceCommand, /) -> PreferenceResult:
 
-        # region 使用独立连接处理真实偏好操作并释放资源
+        # region 执行偏好操作，在事务结束并归还连接后返回结果
         try:
-            with pooled_mysql_connection(self.pool, shareable=False) as connection, connection.cursor() as cursor:
-                match command:
-                    case ListPreferences():
+            match command:
+                case ListPreferences():
 
-                        # region 只读取本消费者的受控键并校验外部存储数据
-                        cursor.execute(
-                            f"SELECT consumer_id, preference_key, value, updated_at FROM {CONSUMER_PREFERENCES_TABLE} "
-                            "WHERE consumer_id=%s AND preference_key=%s",
-                            (self.consumer_id, PreferenceKey.RESPONSE_DETAIL.value),
+                    # region 查看本人当前偏好，缺失时返回空值
+                    with self._engine.connect() as connection:
+                        preference = get_preference(
+                            connection, consumer_id=self._consumer_id, key=PreferenceKey.RESPONSE_DETAIL,
                         )
-                        row = cursor.fetchone()
-                        if row is None:
-                            return PreferenceResult(status=PreferenceStatus.LISTED)
-                        preference = ConsumerPreference(
-                            consumer_id=row[0], preference_key=row[1], value=row[2], updated_at=row[3],
-                        )
-                        return PreferenceResult(status=PreferenceStatus.LISTED, detail=preference.value)
-                        # endregion
+                    return PreferenceResult(
+                        status=PreferenceStatus.LISTED, detail=preference.value if preference is not None else None,
+                    )
+                    # endregion
 
-                    case SetPreference():
+                case SetPreference():
 
-                        # region 原子更新当前值，确认提交后返回新偏好
-                        cursor.execute(
-                            f"INSERT INTO {CONSUMER_PREFERENCES_TABLE} (consumer_id, preference_key, value, updated_at) "
-                            "VALUES (%s, %s, %s, UTC_TIMESTAMP(6)) "
-                            "ON DUPLICATE KEY UPDATE value=%s, updated_at=UTC_TIMESTAMP(6)",
-                            (self.consumer_id, command.key.value, command.value.value, command.value.value),
-                        )
-                        connection.commit()
-                        return PreferenceResult(status=PreferenceStatus.UPDATED, detail=command.value)
-                        # endregion
+                    # region 在独立短事务中保存本人偏好，确认提交后返回新值
+                    with self._engine.begin() as connection:
+                        save_preference(connection, consumer_id=self._consumer_id, key=command.key, value=command.value)
+                    return PreferenceResult(status=PreferenceStatus.UPDATED, detail=command.value)
+                    # endregion
 
-                    case DeletePreference():
+                case DeletePreference():
 
-                        # region 只删除本消费者对应键，确认提交后说明当前无该值
-                        cursor.execute(
-                            f"DELETE FROM {CONSUMER_PREFERENCES_TABLE} WHERE consumer_id=%s AND preference_key=%s",
-                            (self.consumer_id, command.key.value),
-                        )
-                        connection.commit()
-                        return PreferenceResult(status=PreferenceStatus.DELETED)
-                        # endregion
+                    # region 在独立短事务中删除本人偏好，提交后确认无当前值
+                    with self._engine.begin() as connection:
+                        delete_preference(connection, consumer_id=self._consumer_id, key=command.key)
+                    return PreferenceResult(status=PreferenceStatus.DELETED)
+                    # endregion
 
-        except (pymysql.MySQLError, ValidationError):
+        except (SQLAlchemyError, ValidationError):
 
             # region 读取、写入或回执出错时返回失败，避免使用旧值
             return PreferenceResult(status=PreferenceStatus.FAILED)
