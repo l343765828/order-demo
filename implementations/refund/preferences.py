@@ -17,6 +17,7 @@ from utils.mysql import pooled_mysql_connection
 class MySQLPreferences(ManagePreferences):
     # 接收 Host 创建的 MySQL 连接池和已确认的消费者编号。
     def __init__(self, pool: PooledDB, consumer_id: str) -> None:
+
         # region 绑定消费者身份和连接池
         self.pool = pool
         self.consumer_id = consumer_id
@@ -24,11 +25,13 @@ class MySQLPreferences(ManagePreferences):
 
     # 执行查看、设置或删除，只有读到记录或确认提交后才返回相应成功状态。
     def __call__(self, command: PreferenceCommand, /) -> PreferenceResult:
+
         # region 使用独立连接处理真实偏好操作并释放资源
         try:
             with pooled_mysql_connection(self.pool, shareable=False) as connection, connection.cursor() as cursor:
                 match command:
                     case ListPreferences():
+
                         # region 只读取本消费者的受控键并校验外部存储数据
                         cursor.execute(
                             f"SELECT consumer_id, preference_key, value, updated_at FROM {CONSUMER_PREFERENCES_TABLE} "
@@ -43,7 +46,9 @@ class MySQLPreferences(ManagePreferences):
                         )
                         return PreferenceResult(status=PreferenceStatus.LISTED, detail=preference.value)
                         # endregion
+
                     case SetPreference():
+
                         # region 原子更新当前值，确认提交后返回新偏好
                         cursor.execute(
                             f"INSERT INTO {CONSUMER_PREFERENCES_TABLE} (consumer_id, preference_key, value, updated_at) "
@@ -54,7 +59,9 @@ class MySQLPreferences(ManagePreferences):
                         connection.commit()
                         return PreferenceResult(status=PreferenceStatus.UPDATED, detail=command.value)
                         # endregion
+
                     case DeletePreference():
+
                         # region 只删除本消费者对应键，确认提交后说明当前无该值
                         cursor.execute(
                             f"DELETE FROM {CONSUMER_PREFERENCES_TABLE} WHERE consumer_id=%s AND preference_key=%s",
@@ -63,15 +70,19 @@ class MySQLPreferences(ManagePreferences):
                         connection.commit()
                         return PreferenceResult(status=PreferenceStatus.DELETED)
                         # endregion
+
         except (pymysql.MySQLError, ValidationError):
+
             # region 读取、写入或回执出错时返回失败，避免使用旧值
             return PreferenceResult(status=PreferenceStatus.FAILED)
             # endregion
+
         # endregion
 
 
 # 用实际命令结果生成消费者可见的短句。
 def preference_reply(command: PreferenceCommand, result: PreferenceResult) -> str:
+
     # region 根据操作结果显示当前值、确认变更或说明未确认
     label = "简短" if result.detail is ResponseDetail.BRIEF else "详细"
     match result.status:

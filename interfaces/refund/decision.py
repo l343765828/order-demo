@@ -11,6 +11,7 @@ Decision = TypeVar("Decision", bound=StrictModel)
 class Decide(Protocol):
     # 接收决定的数据模型和提示词，返回按该数据模型校验的决定。
     def __call__(self, schema: type[Decision], prompt: str, /) -> Decision:
+
         # region 声明结构化模型决策的输入与返回类型
         ...
         # endregion

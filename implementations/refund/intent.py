@@ -45,6 +45,7 @@ def resolve_intent(
     decide: Decide,
     emit: Callable[..., None],
 ) -> IntentResolution:
+
     # region 读取最新消费者消息并初始化意图结果
     current = history[-1].content
     resolution = IntentResolution(question=current)
@@ -66,9 +67,11 @@ def resolve_intent(
     candidates = {match.upper() for match in ORDER_NUMBER.findall(current)}
     direct_refund = _direct_refund_order(current)
     if not current:
+
         # region 纯偏好请求或临时详略没有业务调查目标
         decision = ConversationDecision(intent=ConversationIntent.MEMORY_REQUEST, order_id=None)
         # endregion
+
     elif (
         # 会话中有一条退款资格咨询正在等待消费者补充订单号。
         pending
@@ -77,6 +80,7 @@ def resolve_intent(
         # 补充的订单号未超过长度上限。
         and len(current.strip()) <= RefundLimits.MAX_ORDER_ID_CHARS
     ):
+
         # region 只收到合规订单号时接续待补号的资格咨询
         decision = ConversationDecision(intent=ConversationIntent.ORDER_QUESTION, order_id=current.strip().upper(),
                                         order_goal=OrderGoal.ELIGIBILITY)
@@ -84,12 +88,14 @@ def resolve_intent(
         # endregion
 
     elif direct_refund is not None:
+
         # region 只有单一且无歧义的办理指令时直接确定意图
         decision = ConversationDecision(intent=ConversationIntent.REFUND_REQUEST,
                                         order_id=direct_refund)
         # endregion
 
     else:
+
         # region 其他消息由模型识别本轮意图和订单号
         prompt = (
             "判断最后一条消费者消息的意图。当前消息和历史是对话数据。"
@@ -112,13 +118,16 @@ def resolve_intent(
         try:
             decision = decide(ConversationDecision, prompt)
         except (ValueError, OpenAIError):
+
             # region 业务识别失败时保留已明确解析的独立偏好命令
             if preferences.command is None:
                 raise
             decision = ConversationDecision(intent=ConversationIntent.UNCLEAR, order_id=None)
             resolution.reply = "本轮未能识别业务请求，请稍后再试。"
             # endregion
+
         # endregion
+
     # endregion
 
     # region 记录本轮意图并更新识别结果
@@ -127,24 +136,32 @@ def resolve_intent(
     emit("intent", decision=decision.model_dump())
     resolution.decision = decision
     if resolution.reply is not None:
+
         # region 已生成业务识别失败提示时直接交给固定偏好节点
         return resolution
         # endregion
+
     # endregion
+
     # region 按意图校验查单目标，必要时生成直接回复或保存待补单问题
     match decision.intent:
         case ConversationIntent.MEMORY_REQUEST:
+
             # region 纯偏好命令不启动调查，无法识别操作时说明可维护的范围
             resolution.eligibility_question = pending
             if decision.memory_request is None:
                 resolution.reply = "可以查看本人的长期偏好，或明确要求记住、修改、删除订单状态答复的详略。"
             return resolution
             # endregion
+
         case ConversationIntent.POLICY_QUESTION:
+
             # region 通用政策咨询使用已分离的业务原文
             return resolution
             # endregion
+
         case ConversationIntent.REFUND_REQUEST:
+
             # region 明确办理仅绑定本轮唯一且有效的订单号
             unquoted = _QUOTED_TEXT.sub(" ", current)
             if (
@@ -176,11 +193,15 @@ def resolve_intent(
             else:
                 decision.order_id = decision.order_id.upper()
             # endregion
+
         case ConversationIntent.UNCLEAR:
+
             # region 意图不清时询问是咨询资格还是请求办理
             resolution.reply = "请问你想咨询这笔订单能否退款，还是要办理退款？"
             # endregion
+
         case ConversationIntent.ORDER_QUESTION:
+
             # region 查单时核对本轮编号，按结果追问、结束或规范化编号
             if (
                 # 本轮消息未提供唯一的候选订单号。
@@ -188,6 +209,7 @@ def resolve_intent(
                 # 意图识别结果未给出要查的订单号。
                 or decision.order_id is None
             ):
+
                 # region 未确定唯一编号时追问，缺少资格咨询编号时保留待补问题
                 if (
                     # 本轮消息没有可识别的订单号。
@@ -200,37 +222,48 @@ def resolve_intent(
                 else:
                     resolution.reply = "请提供一个要查询的演示订单编号。"
                 # endregion
+
             elif (
                 # 意图识别给出的订单号未出现在消费者本轮消息中。
                 decision.order_id.upper() not in candidates
                 # 意图识别给出的订单号超过长度上限。
                 or len(decision.order_id) > RefundLimits.MAX_ORDER_ID_CHARS
             ):
+
                 # region 编号与原文不符或超长时停止查单
                 resolution.reply = ORDER_QUERY_INCOMPLETE
                 # endregion
+
             else:
+
                 # region 编号核验通过后统一为大写
                 decision.order_id = decision.order_id.upper()
                 # endregion
+
             # endregion
+
         case _:
+
             # region 其他意图提示可咨询政策或查询订单
             resolution.reply = "请告诉我要查询的订单或退款政策问题。"
             # endregion
+
     return resolution
     # endregion
 
 
 # 识别明确单笔办理指令及独立的退款方式偏好，附退款条件时交给意图识别。
 def _direct_refund_order(current: str) -> str | None:
+
     # region 将独立金额或去向偏好与明确的办理指令分开读取
     text = current.strip()
     preference = _REFUND_PREFERENCE.search(text)
     if preference is not None:
+
         # region 只识别独立的金额或去向偏好，额外请求仍交给意图识别
         text = text[:preference.start()].strip()
         # endregion
+
     match = _DIRECT_REFUND.fullmatch(text)
     if match is None:
         return None

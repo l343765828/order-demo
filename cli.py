@@ -17,6 +17,7 @@ from utils.events import log_event
 
 # 解析命令行参数，初始化存储并运行会话；返回进程退出码。
 def main() -> int:
+
     # region 解析命令行参数并核对历史模式所需的会话编号
     parser = argparse.ArgumentParser(description="演示订单查询、退款政策咨询与模拟退款")
     parser.add_argument("--session", help="继续本人已有会话")
@@ -38,12 +39,14 @@ def main() -> int:
     try:
         mysql = load_config().mysql
         with open_mysql_checkpointer(mysql.database, **connection_config(mysql)) as saver:
+
             # region 仅初始化检查点时创建所需表并退出
             if args.init_checkpoints:
                 saver.setup()
                 print("checkpoint 初始化完成。")
                 return 0
             # endregion
+
             # region 打开业务连接并运行会话，结束时释放连接池
             pool = create_pool()
             try:
@@ -52,17 +55,22 @@ def main() -> int:
             finally:
                 pool.close()
             # endregion
+
     except SessionUnavailable:
+
         # region 会话不可用时提示并返回退出码 2
         print("会话不可用。", file=sys.stderr)
         return 2
         # endregion
+
     except (ValueError, pymysql.MySQLError) as exc:
+
         # region 配置或数据库出错时记录失败并返回退出码 1
         log_event("host_unavailable", error_type=type(exc).__name__)
         print("无法运行查单 Host，请检查运行配置和 MySQL 初始化。", file=sys.stderr)
         return 1
         # endregion
+
     # endregion
 
 

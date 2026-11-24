@@ -7,6 +7,7 @@ from model.refund.status import DemoDataCommand
 
 # 解析管理命令，显式初始化演示数据库结构或装载种子数据。
 def main() -> None:
+
     # region 解析管理命令，显式初始化演示数据库结构或装载种子数据
     parser = argparse.ArgumentParser()
     parser.add_argument("command", type=DemoDataCommand, choices=tuple(DemoDataCommand))

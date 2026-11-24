@@ -14,6 +14,7 @@ from model.policy.catalog import PublisherId, QualificationConfirmation
 
 # 校验发布源和维护者资格确认，报告实际生效的目录修订。
 def main() -> None:
+
     # region 解析政策原件、显式版本和发布者的资格确认
     parser = argparse.ArgumentParser(description='发布退款政策')
     parser.add_argument('--config', type=Path, help='应用 JSON 配置文件')

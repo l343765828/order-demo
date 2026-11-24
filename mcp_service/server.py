@@ -37,6 +37,7 @@ from utils.events import log_event
 
 # 将有效的事件标识规范为 UUID 字符串，无效时返回空值。
 def _event_uuid(value: object) -> str | None:
+
     # region 将有效的事件标识规范为 UUID 字符串，无效时返回空值
     try:
         return str(UUID(value)) if isinstance(value, str) else None
@@ -64,6 +65,7 @@ class _RejectionReason(StrEnum):
 
 # 将工具日志与客户端追踪标识和 SDK 请求标识关联。
 def _log_tool_event(event: _McpEvent, ctx: ServerRequestContext, **fields) -> None:
+
     # region 将工具日志与客户端追踪标识和 SDK 请求标识关联
     meta = ctx.meta or {}
     log_event(
@@ -80,10 +82,12 @@ class _OrderMcpServer(MCPServer):
     async def call_tool(
         self, name: str, arguments: dict[str, Any], context: Context | None = None,
     ) -> types.CallToolResult | types.InputRequiredResult:
+
         # region 执行 SDK 工具调用并处理可识别的拒绝结果
         try:
             return await super().call_tool(name, arguments, context)
         except ToolError as exc:
+
             # region 缺少请求上下文或发生非预期工具错误时继续抛出
             if (
                 # 无法从调用上下文取得本次 MCP 请求信息。
@@ -93,6 +97,7 @@ class _OrderMcpServer(MCPServer):
             ):
                 raise
             # endregion
+
             # region 按拒绝原因记录未知工具或无效查单参数并返回工具错误
             ctx = context.request_context
             match exc.__cause__:
@@ -108,11 +113,13 @@ class _OrderMcpServer(MCPServer):
                     raise
             return types.CallToolResult(content=[], is_error=True)
             # endregion
+
         # endregion
 
 
 # 创建退款 MCP 应用，分别认证调查及受控执行凭据。
 def make_app(pool, token: str, write_token: str | None = None):
+
     # region 初始化 MCP 服务和只读工具注解
     server = _OrderMcpServer("order-demo")
     read_only = types.ToolAnnotations(read_only_hint=True)
@@ -129,6 +136,7 @@ def make_app(pool, token: str, write_token: str | None = None):
     def get_refund_result(
         order_id: OrderQueryId, ctx: Context, idempotency_key: RefundIdentifier | None = None,
     ) -> RefundLookupResult:
+
         # region 读取真实原退款并记录关联事件
         result = lookup_refund(pool, GetRefundResultRequest(order_id=order_id, idempotency_key=idempotency_key),
                                CONSUMER_ID)
@@ -141,6 +149,7 @@ def make_app(pool, token: str, write_token: str | None = None):
     @server.tool(name=McpToolName.SUBMIT_MOCK_REFUND.value, description="依据有效提交执行整单模拟退款。",
                  annotations=types.ToolAnnotations(read_only_hint=False))
     def submit_mock_refund(order_id: OrderQueryId, idempotency_key: RefundIdentifier, ctx: Context) -> RefundResult:
+
         # region 调查身份或缺少执行身份时拒绝调用
         context = ctx.request_context
         if (
@@ -162,6 +171,7 @@ def make_app(pool, token: str, write_token: str | None = None):
                         idempotency_key=idempotency_key, status=result.status.value)
         return result
         # endregion
+
     # endregion
 
     # region 注册本人订单查询工具
@@ -169,11 +179,13 @@ def make_app(pool, token: str, write_token: str | None = None):
     @server.tool(name=McpToolName.GET_ORDER.value, description="读取当前消费者本人的一笔演示订单。",
                  annotations=read_only)
     def get_order(order_id: OrderQueryId, ctx: Context) -> types.CallToolResult:
+
         # region 查询固定演示消费者的订单并返回结构化结果
         result = query_order(pool, GetOrderRequest.model_construct(order_id=order_id), CONSUMER_ID)
         _log_tool_event(_McpEvent.GET_ORDER, ctx.request_context, status=result.status.value)
         return types.CallToolResult(content=[], structured_content=result.model_dump(mode="json"))
         # endregion
+
     # endregion
 
     # region 注册退款政策检索工具
@@ -184,6 +196,7 @@ def make_app(pool, token: str, write_token: str | None = None):
         query: PolicyQueryText, mode: PolicySearchScope, ctx: Context,
         catalog_revision: PolicyCatalogRevision | None = None,
     ) -> PolicySearchResult:
+
         # region 按指定范围检索政策并释放后端连接
         from implementations.policy.backend import open_policy_backend
 
@@ -195,9 +208,11 @@ def make_app(pool, token: str, write_token: str | None = None):
             with open_policy_backend() as backend:
                 result = search.search_policy(query, mode, backend, catalog=catalog, catalog_revision=catalog_revision)
         except Exception:
+
             # region 后端发生异常时生成失败结果和空候选
             result = PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=str(uuid4()), candidates=[])
             # endregion
+
         # endregion
 
         # region 记录检索状态和事件编号并返回结构化结果
@@ -206,6 +221,7 @@ def make_app(pool, token: str, write_token: str | None = None):
                         requested_catalog_revision=catalog_revision, catalog_revision=result.catalog_revision)
         return result
         # endregion
+
     # endregion
 
     # region 创建无状态 MCP Streamable HTTP 应用
@@ -215,6 +231,7 @@ def make_app(pool, token: str, write_token: str | None = None):
     # region 封装 HTTP 认证并返回 ASGI 应用
     # 校验 HTTP 请求的 Bearer 凭据，放行后将 ASGI 事件交给 MCP 应用。
     async def authenticated(scope: Scope, receive: Receive, send: Send) -> None:
+
         # region Authorization 请求头缺失、重复或凭据不匹配时返回 401
         if scope["type"] == "http":
             headers = Headers(scope=scope).getlist("authorization")
@@ -238,6 +255,7 @@ def make_app(pool, token: str, write_token: str | None = None):
                 await Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
                 return
         # endregion
+
         # region 将其余 ASGI 事件交给 MCP 应用
         await mcp(scope, receive, send)
         # endregion

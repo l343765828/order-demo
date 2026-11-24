@@ -12,6 +12,7 @@ class StrictModel(BaseModel):
 
 # 保留原有内联字符串枚举 Schema，供按完整 Schema 绑定工具的 MCP 客户端使用。
 def status_schema(status: type[StrEnum], title: str = "Status") -> WithJsonSchema:
+
     # region 保留原有内联字符串枚举 Schema，供按完整 Schema 绑定工具的 MCP 客户端使用
     return WithJsonSchema({"type": "string", "enum": [member.value for member in status], "title": title})
     # endregion

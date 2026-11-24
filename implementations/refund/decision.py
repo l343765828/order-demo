@@ -13,6 +13,7 @@ from utils.qwen_client import QwenChatOpenAI
 class QwenDecider(Decide):
     # 接收已配置的 Qwen 客户端和当前会话的事件记录函数。
     def __init__(self, model: QwenChatOpenAI, emit: Callable[..., None]) -> None:
+
         # region 接收已配置的 Qwen 客户端和当前会话的事件记录函数
         self.model = model
         self.emit = emit
@@ -20,6 +21,7 @@ class QwenDecider(Decide):
 
     # 使用指定模型类约束输出，将政策选择写入当前请求的事件日志。
     def __call__(self, schema: type[Decision], prompt: str, /) -> Decision:
+
         # region 业务意图沿用原有模型 Schema，固定偏好命令由应用节点组装
         if schema is ConversationDecision:
             business = cast(BusinessConversationDecision, self.model.with_structured_output(

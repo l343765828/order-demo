@@ -22,6 +22,7 @@ from workflows.refund import build_graph, load_refund_state, run_refund_turn
 
 # 载入或创建消费者会话，处理交互消息并保存原文与检查点。
 def run_cli(args, pool, saver, http: httpx.Client) -> int:
+
     # region 创建模型客户端并确定会话编号
     settings = load_config()
     model = create_qwen_client(settings.qwen, http_client=http)
@@ -33,12 +34,14 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
     # region 绑定调查和日志回调并构建退款流程
     # 为当前会话和请求关联标识输出结构化过程事件。
     def emit(event: str, **fields) -> None:
+
         # region 为当前会话和请求关联标识输出结构化过程事件
         log_event(event, session_id=session_id, trace_id=trace_id, **fields)
         # endregion
 
     # 将已验证的查单步骤交给订单调查执行器。
     def investigate(step: InvestigationStep, trace_id: str) -> OrderToolEvent | None:
+
         # region 将已验证的查单步骤交给订单调查执行器
         event = execute_order(step, trace_id, emit)
         return event if isinstance(event, OrderToolEvent) else None
@@ -46,6 +49,7 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
 
     # 将政策步骤交给 PolicyAgent，检索范围由外层图指定。
     def search(step: PolicyStep, trace_id: str, mode: PolicySearchMode) -> PolicyToolEvent | None:
+
         # region 按外层流程指定的范围执行政策调查
         event = execute_order(step, trace_id, emit, mode=mode)
         return event if isinstance(event, PolicyToolEvent) else None
@@ -53,6 +57,7 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
 
     # 核对发送节点所属的轮次确实来自当前进程正在处理的新用户输入。
     def is_live(candidate_trace: str) -> bool:
+
         # region 与当前调用关联，恢复 checkpoint 时不把历史追踪标识当作授权
         return candidate_trace == live_trace
         # endregion
@@ -61,6 +66,7 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
                         refund=RefundExecution(pool, settings, emit), is_live=is_live,
                         preferences=MySQLPreferences(pool, CONSUMER_ID))
     # endregion
+
     # region 校验会话归属，恢复历史和检查点并显示会话编号
     with open_conversation(pool, session_id, CONSUMER_ID) as conversation:
         session_id = conversation.session_id
@@ -71,6 +77,7 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
              pending_nodes=list(pending_nodes))
     print(f"会话：{session_id}", flush=True)
     # endregion
+
     # region 仅请求历史时，输出已保存原文并结束本次命令
     if args.history:
         for stored in history:
@@ -80,13 +87,16 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
 
     # region 读取消费者消息，执行退款调查并输出回复
     while True:
+
         # region 读到输入结束或消费者中断时退出会话
         try:
             message = args.message if args.message is not None else input("你：")
         except (EOFError, KeyboardInterrupt):
             return 0
         # endregion
+
         if message.strip():
+
             # region 收到非空消息时保存原文、运行调查并记录和展示回复
             with open_conversation(pool, session_id, CONSUMER_ID) as conversation:
                 trace_id = str(uuid4())
@@ -101,18 +111,22 @@ def run_cli(args, pool, saver, http: httpx.Client) -> int:
                     live_trace = None
                 reply = state.reply
                 if state.preference_result is not None:
+
                     # region 合并业务答复和独立的真实偏好操作结果
                     assert state.decision is not None and state.decision.memory_request is not None
                     outcome = preference_reply(state.decision.memory_request, state.preference_result)
                     reply = f"{reply}\n{outcome}" if reply else outcome
                     # endregion
+
                 assert isinstance(reply, str)
                 conversation.append(ExchangeMessage(role=ConversationRole.ASSISTANT, content=reply))
             emit("turn_completed")
             print(reply, flush=True)
             # endregion
+
         # region 单条消息模式处理结束后退出
         if args.message is not None:
             return 0
         # endregion
+
     # endregion

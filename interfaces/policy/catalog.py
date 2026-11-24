@@ -9,6 +9,7 @@ from model.policy.catalog import PolicySnapshot
 class PolicyCatalogReader(Protocol):
     # 指定修订时读取该历史快照，省略时读取最新修订。
     def snapshot(self, revision: int | None = None) -> PolicySnapshot:
+
         # region 声明目录快照读取接口
         ...
         # endregion

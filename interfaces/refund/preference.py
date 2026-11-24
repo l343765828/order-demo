@@ -9,6 +9,7 @@ from model.refund.preference import PreferenceCommand, PreferenceResult
 class ManagePreferences(Protocol):
     # 执行偏好命令并返回实际读写结果。
     def __call__(self, command: PreferenceCommand, /) -> PreferenceResult:
+
         # region 声明固定节点需要的偏好操作契约
         ...
         # endregion

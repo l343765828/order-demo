@@ -18,6 +18,7 @@ FIELDS = list(PolicyEntry.model_fields)
 
 # 生成只匹配一份文档特定版本的 Milvus 过滤式。
 def version_filter(target: PolicyVersion) -> str:
+
     # region 用完整文档版本对限定检索或维护的索引范围
     return f'(document_id == {json.dumps(target.document_id)} and version == {json.dumps(target.version)})'
     # endregion
@@ -27,6 +28,7 @@ def version_filter(target: PolicyVersion) -> str:
 class PolicyBackend(PolicySearchBackend):
     # 创建独立客户端，不为模型调用暴露数据库参数。
     def __init__(self):
+
         # region 创建独立客户端，不为模型调用暴露数据库参数
         policy = load_config().policy
         if policy is None:
@@ -38,12 +40,14 @@ class PolicyBackend(PolicySearchBackend):
 
     # 关闭 Milvus 连接。
     def close(self):
+
         # region 关闭 Milvus 连接
         self.client.close()
         # endregion
 
     # 用 BGE-M3 编码文本，返回符合政策维度的归一化向量。
     def embed(self, text: str) -> list[float]:
+
         # region 请求 BGE-M3 编码并从响应中提取向量
         with httpx.Client(timeout=PolicyLimits.MODEL_TIMEOUT_SECONDS, trust_env=False) as http:
             response = http.post(self.base + '/bge/v1/embeddings', json={'model': 'BAAI/bge-m3', 'input': [text]})
@@ -57,6 +61,7 @@ class PolicyBackend(PolicySearchBackend):
 
     # 在服务端按目录快照的文档版本组合预过滤，统一召回最多八条。
     def recall(self, vector: list[float], mode: PolicySearchMode, versions: list[PolicyVersion]) -> list[PolicyEntry]:
+
         # region 以目录中的完整文档版本对过滤，正式范围再限定条目类型
         match mode:
             case PolicySearchMode(value=PolicySearchMode.FORMAL.value):
@@ -81,6 +86,7 @@ class PolicyBackend(PolicySearchBackend):
 
     # 重排全部候选并严格验证返回的索引，最多返回前三条。
     def rerank(self, query: str, candidates: list[PolicyEntry]) -> list[PolicyEntry]:
+
         # region 将本轮候选原文与查询一起送重排
         with httpx.Client(timeout=PolicyLimits.MODEL_TIMEOUT_SECONDS, trust_env=False) as http:
             response = http.post(self.base + '/reranker/v1/rerank', json={
@@ -104,6 +110,7 @@ class PolicyBackend(PolicySearchBackend):
 
     # 仅创建缺失的专用集合和固定索引；不删除已有集合。
     def create_collection(self):
+
         # region 已有政策集合时核对字段和索引，发现不兼容时停止发布
         if self.client.has_collection(self.collection):
             description = self.client.describe_collection(self.collection)
@@ -160,6 +167,7 @@ class PolicyBackend(PolicySearchBackend):
 
     # 写入调用方已取得发布许可的完整版本条目，并等待服务确认写入。
     def publish(self, entries: list[PolicyEntry]) -> None:
+
         # region 结合已校验的政策条目与已归一化的向量，按稳定主键写入专用集合
         records = [PolicyVectorRecord.model_construct(**entry.model_dump(), embedding=self.embed(entry.text))
                    for entry in entries]
@@ -172,6 +180,7 @@ class PolicyBackend(PolicySearchBackend):
 
     # 强一致检查此文档版本是否已有索引记录。
     def has_entries(self, target: PolicyVersion) -> bool:
+
         # region 只读取一个主键以核对文档版本是否为空
         return bool(self.client.query(self.collection, filter=version_filter(target), output_fields=['chunk_id'],
                                       limit=1, consistency_level='Strong',
@@ -180,6 +189,7 @@ class PolicyBackend(PolicySearchBackend):
 
     # 清理从未生效的单一文档版本，并核对没有残留条目。
     def clear_version(self, target: PolicyVersion) -> None:
+
         # region 仅删除目标文档版本并等待删除确认
         self.client.delete(self.collection, filter=version_filter(target),
                            timeout=PolicyLimits.MILVUS_WRITE_TIMEOUT_SECONDS)
@@ -193,6 +203,7 @@ class PolicyBackend(PolicySearchBackend):
 
     # 强一致回读一个完整版本，逐条解析公开字段和已存储的向量。
     def read_version(self, target: PolicyVersion) -> list[PolicyEntry]:
+
         # region 遍历全部目标条目，验证存储字段和向量后返回可与原件比对的条目
         iterator = self.client.query_iterator(
             collection_name=self.collection, filter=version_filter(target), output_fields=[*FIELDS, 'embedding'],
@@ -214,6 +225,7 @@ class PolicyBackend(PolicySearchBackend):
 # 在检索或发布需要使用 Milvus 时创建并释放后端连接。
 @contextmanager
 def open_policy_backend() -> Iterator[PolicyBackend]:
+
     # region 创建政策后端并在使用结束后释放连接
     backend = PolicyBackend()
     try:

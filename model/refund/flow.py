@@ -18,6 +18,9 @@ from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerifica
 
 # 定义退款业务流程使用的 LangGraph 节点标识。
 class OrderFlowNode(StrEnum):
+    # 节点标识以字符串传给 LangGraph，显式声明兼容 PyCharm 对 StrEnum.value 的类型检查。
+    value: str
+
     INTENT = "intent"  # 识别本轮意图并初始化调查状态。
     PREFERENCES = "preferences"  # 处理当前长期偏好命令并准备当轮表达。
     PLAN = "plan"  # 制定或核对本轮只读调查计划。
@@ -133,6 +136,7 @@ class TaskObservation(StrictModel):
     # 每个观察必须对应一种工具结果，政策证据只能附在政策观察上。
     @model_validator(mode="after")
     def check_payload(self):
+
         # region 观察须恰有一种工具结果，退款政策依据只可附于政策观察
         if (self.order_result is None) == (self.policy_result is None):
             raise ValueError("观察必须携带一种工具结果")

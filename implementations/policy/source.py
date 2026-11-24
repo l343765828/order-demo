@@ -16,6 +16,7 @@ _ENTRY_PREFIX = re.compile(r'^##\s+(?:RF|FAQ)-', re.MULTILINE)
 
 # 从权威原件读取标题、文档编号和条目，核对维护者指定的版本。
 def read_policy_document(source: str, *, version: str) -> PolicyDocument:
+
     # region 校验文档标题、唯一文档编号和显式版本
     header = _ENTRY_PREFIX.split(source, maxsplit=1)[0]
     title = re.match(r'^# (\S[^\n]*)', header)
@@ -42,6 +43,7 @@ def read_policy_document(source: str, *, version: str) -> PolicyDocument:
 # 将文档分为带独立正文的条款和 FAQ；默认身份供演示源的既有验证脚本使用。
 def parse_policy(source: str, *, target: PolicyVersion | None = None,
                  title: str = DemoPolicy.BASELINE_TITLE) -> list[PolicyEntry]:
+
     # region 确认每个条目标题均可识别
     if target is None:
         target = PolicyVersion(document_id=DemoPolicy.DOCUMENT_ID, version=DemoPolicy.BASELINE_VERSION)

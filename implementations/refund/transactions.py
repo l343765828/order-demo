@@ -19,6 +19,7 @@ from utils.mysql import pooled_mysql_connection
 
 # 从持久记录投影消费者核对所需的订单、退款单号和实付金额。
 def _receipt(row) -> RefundReceipt:
+
     # region 校验退款库记录并提取对外字段
     record = RefundRecord.model_validate(row)
     return RefundReceipt(order_id=record.order_id, refund_id=record.refund_id,
@@ -28,6 +29,7 @@ def _receipt(row) -> RefundReceipt:
 
 # 只读核对本人订单原退款，未知提交键时仍可按订单查询。
 def lookup_refund(pool, request: GetRefundResultRequest, consumer_id: str) -> RefundLookupResult:
+
     # region 以经认证的消费者限定查询并读取真实退款
     try:
         with pooled_mysql_connection(pool) as connection, connection.cursor(DictCursor) as cursor:
@@ -38,19 +40,24 @@ def lookup_refund(pool, request: GetRefundResultRequest, consumer_id: str) -> Re
             )
             row = cursor.fetchone()
             if row is None:
+
                 # region 没有本人原退款时返回未找到
                 return RefundLookupResult(status=RefundLookupStatus.NOT_FOUND)
                 # endregion
+
             return RefundLookupResult(status=RefundLookupStatus.FOUND, refund=_receipt(row))
     except (MySQLError, ValueError):
+
         # region 库不可读或原记录损坏时返回查询不可用
         return RefundLookupResult(status=RefundLookupStatus.UNAVAILABLE)
         # endregion
+
     # endregion
 
 
 # 读取已锁定提交对应的会话授权和订单，在当前事务内决定是否插入退款。
 def _execute(cursor, request: SubmitMockRefundRequest, consumer_id: str) -> RefundResult:
+
     # region 先锁提交，校验请求匹配及授权来源的消费者归属
     cursor.execute(f"SELECT * FROM {RefundTables.DISPATCHES} WHERE idempotency_key=%s FOR UPDATE",
                    (request.idempotency_key,))
@@ -67,9 +74,11 @@ def _execute(cursor, request: SubmitMockRefundRequest, consumer_id: str) -> Refu
         (dispatch.session_id, consumer_id, dispatch.source_message_sequence, ConversationRole.USER.value),
     )
     if cursor.fetchone() is None:
+
         # region 授权原文不存在或会话归属不符时拒绝
         return invalid
         # endregion
+
     # endregion
 
     # region 再锁本人订单，优先回传已有退款
@@ -113,6 +122,7 @@ def _execute(cursor, request: SubmitMockRefundRequest, consumer_id: str) -> Refu
 
 # 执行一次退款事务，区分提交确认丢失与明确回滚。
 def submit_refund(pool, request: SubmitMockRefundRequest, consumer_id: str) -> RefundResult:
+
     # region 在独占连接上执行事务，只有提交返回后才确认本次成功
     committing = False
     try:
@@ -128,14 +138,18 @@ def submit_refund(pool, request: SubmitMockRefundRequest, consumer_id: str) -> R
                     connection.rollback()
                 return result
             except (MySQLError, ValueError):
+
                 # region 写入确认前异常时释放事务，遇提交错误由 Host 核对
                 connection.rollback()
                 raise
                 # endregion
+
     except (MySQLError, ValueError):
+
         # region COMMIT 可能已生效时返回未确认，其他错误无成功提交
         if committing:
             return RefundResult(status=RefundOutcome.UNCONFIRMED, reason=RefundReason.RECEIPT_UNKNOWN)
         return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.DATABASE_FAILURE)
         # endregion
+
     # endregion

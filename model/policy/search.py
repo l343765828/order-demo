@@ -18,6 +18,7 @@ PolicyCatalogRevision = Annotated[int, Field(strict=True, gt=0)]
 
 # 由文档、版本和条目编号生成稳定的政策条目主键。
 def policy_chunk_id(document_id: str, version: str, clause_id: str) -> str:
+
     # region 由文档、版本和条目编号生成稳定的政策条目主键
     return hashlib.sha256(f'{document_id}:{version}:{clause_id}'.encode('utf-8')).hexdigest()
     # endregion
@@ -66,6 +67,7 @@ class PolicyEntry(PolicyCandidate):
     # 校验各字符串字段的存储长度。
     @model_validator(mode='after')
     def check_lengths(self):
+
         # region 按 UTF-8 字节核对字段长度，并确保主键来自文档编号、版本和条目编号
         if any(len(getattr(self, key).encode('utf-8')) > limit for key, limit in PolicyLimits.FIELD_BYTES.items()):
             raise ValueError('政策条目超过字段字节限制')
@@ -84,6 +86,7 @@ class PolicyVectorRecord(PolicyEntry):
     @field_validator('embedding')
     @classmethod
     def check_embedding(cls, values: list[float]) -> list[float]:
+
         # region 向量含非有限值或模长超出允许误差时拒绝写入
         if not all(math.isfinite(value) for value in values):
             raise ValueError('政策向量含非有限值')
@@ -114,6 +117,7 @@ class PolicySearchResult(BaseModel):
     # 将 SDK 接收的检索结果恢复为具名模型和业务枚举。
     @classmethod
     def from_mcp(cls, data: dict[str, Any]) -> Self:
+
         # region 校验 MCP 回执，成功结果必须携带可用于补查的修订号
         result = cls.model_validate(data)
         if (
@@ -129,6 +133,7 @@ class PolicySearchResult(BaseModel):
     # 检索失败时禁止将候选误认为可靠结果。
     @model_validator(mode='after')
     def check_failure(self):
+
         # region 检索失败时只允许空候选列表
         if (
             # 政策检索服务报告本轮失败。

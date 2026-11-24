@@ -12,12 +12,14 @@ from model.refund.status import DemoDataCommand
 
 # 根据管理命令初始化应用表或装载演示种子。
 def manage_demo_data(command: DemoDataCommand) -> None:
+
     # region 使用独立数据库连接初始化演示库或装载种子数据
     mysql = load_config().mysql
     connection = pymysql.connect(**connection_config(mysql), autocommit=True)
     try:
         with connection.cursor() as cursor:
             match command:
+
                 # region init 补齐缺失的演示库、应用表和退款外键
                 case DemoDataCommand.INIT:
                     database = mysql.database.replace("`", "``")
@@ -57,6 +59,7 @@ def manage_demo_data(command: DemoDataCommand) -> None:
                         connection.rollback()
                         raise
                 # endregion
+
     finally:
         connection.close()
     # endregion

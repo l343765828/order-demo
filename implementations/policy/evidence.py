@@ -10,6 +10,7 @@ def verify_policy_evidence(
     evidence: PolicyEvidence, results: list[PolicySearchResult], *, formal_only: bool = True,
     complete_excerpt: bool = False,
 ) -> bool:
+
     # region 缺少充分依据或本轮目录修订时拒绝核验
     first_success = next((result for result in results if result.status is PolicySearchStatus.OK), None)
     if (

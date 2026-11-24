@@ -16,6 +16,7 @@ class SessionUnavailable(Exception):
 class Conversation:
     # 绑定当前会话编号与已获取的数据库连接。
     def __init__(self, connection, session_id: str):
+
         # region 绑定当前会话编号与已获取的数据库连接
         self.connection = connection
         self.session_id = session_id
@@ -23,6 +24,7 @@ class Conversation:
 
     # 按消息序号读取当前会话的消费者和助手原文。
     def history(self) -> list[ExchangeMessage]:
+
         # region 按会话编号限定读取范围并按原始序号恢复消息
         with self.connection.cursor() as cursor:
             cursor.execute(
@@ -34,6 +36,7 @@ class Conversation:
 
     # 为当前会话分配下一消息序号，写入原文并提交事务。
     def append(self, message: ExchangeMessage) -> int:
+
         # region 当前会话独占期间提交原文，保证序号和落库顺序
         with self.connection.cursor() as cursor:
             cursor.execute("SELECT COALESCE(MAX(sequence), 0)+1 FROM conversation_messages WHERE session_id=%s",
@@ -55,6 +58,7 @@ class Conversation:
 
 # 为指定消费者创建会话并返回新的会话编号。
 def create_conversation(pool, consumer_id: str) -> str:
+
     # region 生成独立会话编号，绑定消费者并提交后供本轮使用
     session_id = str(uuid4())
     connection = pool.connection()
@@ -75,7 +79,9 @@ def create_conversation(pool, consumer_id: str) -> str:
 # 核验会话归属并取得会话锁，在上下文退出时释放连接与锁。
 @contextmanager
 def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conversation]:
+
     # region 独占会话并检查消费者归属，使用后释放数据库资源
+
     # region 验证会话编号并取得用于加锁的连接
     try:
         session_id = str(UUID(session_id))
@@ -85,7 +91,9 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
     lock = f"order_demo:conversation:{session_id}"
     locked = False
     # endregion
+
     try:
+
         # region 取得会话锁且归属匹配时交付会话
         with connection.cursor() as cursor:
             cursor.execute("SELECT GET_LOCK(%s, 0)", (lock,))
@@ -105,6 +113,7 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
         # endregion
 
     finally:
+
         # region 会话结束或中途失败时回滚事务、释放锁并关闭连接
         try:
             connection.rollback()
@@ -114,4 +123,5 @@ def open_conversation(pool, session_id: str, consumer_id: str) -> Iterator[Conve
         finally:
             connection.close()
         # endregion
+
     # endregion

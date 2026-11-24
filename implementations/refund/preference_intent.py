@@ -33,6 +33,7 @@ _NON_DIRECTIVE = re.compile(
 
 # 移除已识别指令，只把其余当前消息交给业务意图和调查节点。
 def parse_preference_intent(current: str) -> PreferenceIntent:
+
     # region 保留原文索引并遮盖引用，避免把转述当成新指令
     unquoted = current
     for quoted in _QUOTED.finditer(current):
@@ -65,9 +66,11 @@ def parse_preference_intent(current: str) -> PreferenceIntent:
     # region 解析本轮表达要求，临时详略不形成持久化命令
     for match in _TEMPORARY.finditer(unquoted):
         if any(start <= match.start() < end for start, end in spans):
+
             # region 长期指令已经消费其所含的详略措辞
             continue
             # endregion
+
         result.temporary_detail = ResponseDetail.BRIEF if match.group("brief") else ResponseDetail.DETAILED
         spans.append(match.span())
     # endregion
@@ -84,8 +87,10 @@ def parse_preference_intent(current: str) -> PreferenceIntent:
         # 当前消息试图查看其他消费者的偏好。
         or _OTHER_LIST.fullmatch(unquoted.strip().rstrip("。！!？?"))
     ):
+
         # region 只有普通陈述或越范围请求时提示可管理的本人偏好
         result.business_text = ""
         # endregion
+
     return result
     # endregion

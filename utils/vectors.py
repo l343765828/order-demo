@@ -5,6 +5,7 @@ import math
 
 # 校验向量是否符合调用方指定的维度，返回 L2 归一化后的向量。
 def normalize_vector(values: list[float], *, expected_dimensions: int) -> list[float]:
+
     # region 校验向量维度和元素，模长有限且非零时执行归一化
     if (
         # 输入向量的维度与调用方要求不符。

@@ -87,6 +87,7 @@ class AppConfig:
 
 # 校验 MCP 凭据为足够长且可安全放入 HTTP 请求头的字符串。
 def _valid_mcp_token(token: object) -> bool:
+
     # region 核对长度、ASCII 编码及可见字符
     return isinstance(token, str) and len(token) >= ConnectionLimits.MCP_TOKEN_MIN_CHARS and all(
         "!" <= character <= "~" for character in token
@@ -96,9 +97,11 @@ def _valid_mcp_token(token: object) -> bool:
 
 # 读取并校验指定 JSON 配置，返回应用配置；错误信息不包含配置值。
 def load_config(path: str | Path | None = None) -> AppConfig:
+
     # region 加载并校验应用配置，失败时报告文件路径
     source = Path(path) if path is not None else _config_path
     try:
+
         # region 读取 JSON 并构造配置对象
         data = json.loads(source.read_text(encoding="utf-8"))
         config = AppConfig(mysql=MySQLConfig(**data["mysql"]), mcp=MCPConfig(**data["mcp"]),
@@ -106,6 +109,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                            policy=PolicyConfig(**data["policy"]) if "policy" in data else None,
                            refund_policy_events_dir=data.get("refund_policy_events_dir"))
         # endregion
+
         # region 校验连接字段、端口、模型限制和可选政策配置
         if (
             # 必填连接、凭据或模型字段中有值不是非空字符串。
@@ -157,6 +161,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ):
             raise ValueError
         # endregion
+
         # region 校验 MCP 凭据后返回配置
         if (
             # 只读凭据格式不适合 HTTP 认证。
@@ -179,15 +184,19 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             raise ValueError
         return config
         # endregion
+
     except (OSError, ValueError, TypeError, KeyError):
+
         # region 配置无法读取、解析或校验时抛出统一错误
         raise ValueError(f"无法加载配置 {source}，请检查 JSON 字段和取值。") from None
         # endregion
+
     # endregion
 
 
 # 设置后续加载配置时使用的路径，未指定时恢复默认路径。
 def use_config(path: str | Path | None) -> None:
+
     # region 设置后续加载配置时使用的路径，未指定时恢复默认路径
     global _config_path
     _config_path = Path(path) if path else DEFAULT_PATH

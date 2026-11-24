@@ -68,6 +68,7 @@ class PolicyEvidence(StrictModel):
     # 充分证据必须明确包含至少一条引用。
     @model_validator(mode='after')
     def require_citations(self):
+
         # region 声明依据充分时至少提供一条政策引用
         if (
             # 该结果声明退款政策依据充分。

@@ -20,6 +20,7 @@ LEGACY_FAQ_REFERENCES = re.compile(r"\s*依据：RF-\d{3}(?:、RF-\d{3})*。\s*$
 
 # 按可信订单事实确定所需条款、检索查询和资格解释。
 def eligibility(order: OrderDetails) -> tuple[EligibilityClause, str, str]:
+
     # region 已退款优先提示不可重复办理，未支付或已发货时引用限制条款
     if order.refund_status is RefundStatus.REFUNDED:
         return EligibilityClause.ALREADY_REFUNDED, "订单已完成模拟退款，不重复办理", "已有模拟退款记录，不能再次办理。"
@@ -38,6 +39,7 @@ def eligibility(order: OrderDetails) -> tuple[EligibilityClause, str, str]:
 def answer_policy(
     decide: Decide, question: str, query: str, results: list[PolicySearchResult], order: OrderDetails | None,
 ) -> tuple[str | None, PolicyEvidence, str | None]:
+
     # region 读取本次重排候选并初始化选答与补查信息
     receipt = results[-1]
     candidates = receipt.candidates
@@ -87,6 +89,7 @@ def answer_policy(
             status=PolicyEvidenceStatus.SUFFICIENT, citations=[citation],
         )
         if verify_policy_evidence(evidence, results, formal_only=order is not None):
+
             # region 资格解释采用可信订单事实，咨询正文按条目类型从回执提取
             if order is not None:
                 answer = f"订单 {order.order_id}：{explanation} 本轮仅解释资格。"
@@ -99,6 +102,7 @@ def answer_policy(
             if answer:
                 return f"{answer}\n依据：《{selected.title}》{selected.version} 版 {selected.clause_id}。", evidence, None
             # endregion
+
     # endregion
 
     # region 缺少适用条目时准备一次正式条款语义补查

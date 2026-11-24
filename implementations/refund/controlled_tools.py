@@ -27,11 +27,13 @@ class RefundToolUnavailable(Exception):
 def _call(settings: MCPConfig, token: str, name: McpToolName, request: BaseModel,
           decode: Callable[[dict[str, Any]], ToolResult], trace_id: str,
           before_send: Callable[[], None] | None = None) -> ToolResult:
+
     # region 使用指定身份独立建立会话并传递本次追踪标识
     attempted = False
 
     # 发送受控的单次请求并读取具名结果。
     async def invoke() -> ToolResult:
+
         # region 发现唯一工具并通过底层会话发送一次
         nonlocal attempted
         timeout = ConnectionLimits.REFUND_CALL_SECONDS
@@ -47,16 +49,19 @@ def _call(settings: MCPConfig, token: str, name: McpToolName, request: BaseModel
     try:
         return Context().run(run, invoke())
     except Exception as exc:
+
         # region 尚未调用工具时明确失败，否则保留发送后的原异常
         if not attempted:
             raise RefundToolUnavailable from exc
         raise
         # endregion
+
     # endregion
 
 
 # 固定复核节点以调查凭据读取最新本人订单。
 def read_order(settings: MCPConfig, order_id: str, trace_id: str) -> OrderQueryResult:
+
     # region 使用正式订单契约发出不经过模型的只读复核
     return _call(settings, settings.read_token, McpToolName.GET_ORDER,
                  GetOrderRequest(order_id=order_id), OrderQueryResult.from_mcp, trace_id)
@@ -65,6 +70,7 @@ def read_order(settings: MCPConfig, order_id: str, trace_id: str) -> OrderQueryR
 
 # 固定核对节点以调查凭据读取原退款。
 def read_refund(settings: MCPConfig, request: GetRefundResultRequest, trace_id: str) -> RefundLookupResult:
+
     # region 通过只读通道取得真实原退款结果
     return _call(settings, settings.read_token, McpToolName.GET_REFUND_RESULT, request,
                  RefundLookupResult.from_mcp, trace_id)
@@ -74,6 +80,7 @@ def read_refund(settings: MCPConfig, request: GetRefundResultRequest, trace_id: 
 # 仅固定执行节点使用独立凭据发送已确认提交。
 def send_refund(settings: MCPConfig, request: SubmitMockRefundRequest, trace_id: str,
                 *, before_send: Callable[[], None]) -> RefundResult:
+
     # region 执行身份可用时单次发送并校验结构化业务结果
     if settings.write_token is None:
         raise RefundToolUnavailable("退款执行身份未配置")

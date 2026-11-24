@@ -27,6 +27,7 @@ from utils.events import persist_event
 
 # 提取不同正文所表达的规则，已知原文沿用确定性核对。
 def _matches_execution_policy(excerpt: str, interpret: Decide) -> bool:
+
     # region 匹配已验证的基线正文时无需重新解释条款
     if sha256(excerpt.encode("utf-8")).hexdigest() == DemoPolicy.ELIGIBILITY_EXCERPT_SHA256:
         return True
@@ -50,6 +51,7 @@ def _matches_execution_policy(excerpt: str, interpret: Decide) -> bool:
 class RefundExecution:
     # 注入当前 Host 的存储、配置和事件输出。
     def __init__(self, pool, settings: AppConfig, emit: Callable[..., None]):
+
         # region 保存可信运行配置及依赖
         self.pool = pool
         self.settings = settings
@@ -58,6 +60,7 @@ class RefundExecution:
 
     # 确认已知提交的业务状态；回写故障时保留退款库的真实结果。
     def _record(self, key: str, result: RefundResult) -> None:
+
         # region 尝试更新未决提交，原回执不受回写故障影响
         try:
             dispatches.record_dispatch_result(self.pool, key, result)
@@ -67,6 +70,7 @@ class RefundExecution:
 
     # 仅以只读工具核对原结果，找不到时保留旧提交拦截。
     def _lookup(self, order_id: str, trace_id: str, key: str | None = None, *, attempted: bool = False) -> RefundResult:
+
         # region 调用只读核对并校验订单，传输故障按未知处理
         self.emit(RefundEvent.LOOKUP.value, order_id=order_id, idempotency_key=key)
         request = GetRefundResultRequest(order_id=order_id, idempotency_key=key)
@@ -100,6 +104,7 @@ class RefundExecution:
     # 根据可信订单和未决记录决定是否可继续调查或执行，None 表示可以继续。
     def preflight(self, authorization: AuthorizedRefundIntent, order_result: OrderQueryResult,
                   trace_id: str) -> RefundResult | None:
+
         # region 缺少可操作的本人订单时立即停止
         order = order_result.order
         if order_result.status is OrderQueryStatus.UNAVAILABLE:
@@ -140,6 +145,7 @@ class RefundExecution:
     def review(self, authorization: AuthorizedRefundIntent, evidence: PolicyEvidence,
                receipts: list[PolicySearchResult], trace_id: str,
                interpret: Decide) -> RefundPolicyVerification | RefundResult:
+
         # region 用独立只读工具重查订单，状态变化时立即结束办理
         try:
             current = controlled_tools.read_order(self.settings.mcp, authorization.order_id, trace_id)
@@ -185,6 +191,7 @@ class RefundExecution:
 
     # 保存当轮提交并最多发送一次，未确认结果仅使用只读核对。
     def send(self, event: RefundPolicyVerification) -> RefundResult:
+
         # region 确认本次提交已保存，遇竞争或旧提交时只读核对
         key = event.idempotency_key
         authorization = event.authorization
@@ -207,6 +214,7 @@ class RefundExecution:
 
         # 在会话初始化及发现工具成功后记录实际写入尝试。
         def report_send() -> None:
+
             # region 关联单次写调用与已经保存的提交
             self.emit(RefundEvent.SUBMIT.value, **request.model_dump(mode="json"))
             # endregion
@@ -221,13 +229,17 @@ class RefundExecution:
             ):
                 raise ValueError("退款回执订单不匹配")
         except controlled_tools.RefundToolUnavailable:
+
             # region 认证或发现失败且未发送时关闭本次提交
             result = RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.EXECUTION_UNAVAILABLE)
             # endregion
+
         except Exception:
+
             # region 已尝试发送且无可信回执时转入核对
             result = RefundResult(status=RefundOutcome.UNCONFIRMED, reason=RefundReason.RECEIPT_UNKNOWN)
             # endregion
+
         if result.status is RefundOutcome.UNCONFIRMED:
             return self._lookup(request.order_id, event.trace_id, key, attempted=True)
         self._record(key, result)

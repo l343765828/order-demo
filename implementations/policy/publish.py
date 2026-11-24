@@ -15,6 +15,7 @@ from model.policy.status import PolicyEntryType, PolicySearchMode
 
 # 强一致回读完整条目，再通过正常召回与重排确认此版本可检索。
 def _verify_index(document: PolicyDocument, backend: PolicyBackend) -> None:
+
     # region 核对全部条目及原文，包括多余或重复的主键
     expected = sorted(document.entries, key=lambda item: item.chunk_id)
     actual = sorted(backend.read_version(document.target), key=lambda item: item.chunk_id)
@@ -42,6 +43,7 @@ def _verify_index(document: PolicyDocument, backend: PolicyBackend) -> None:
 def publish_policy(document: PolicyDocument, *, publisher: str, qualification: QualificationConfirmation,
                    catalog: MySQLPolicyCatalog, open_backend: Callable[[], AbstractContextManager[PolicyBackend]],
                    confirm_write_ended: bool = False) -> PolicyPublicationResult:
+
     # region 读取发布基准和版本记录，优先核对曾经生效的版本
     approval = PolicyPublicationApproval(source_digest=document.source_digest, publisher=publisher,
                                          qualification=qualification)
@@ -54,6 +56,7 @@ def publish_policy(document: PolicyDocument, *, publisher: str, qualification: Q
             # 发布记录证明该版本曾经生效。
             and previous.activated_revision is not None
         ):
+
             # region 确认为原版本重发时返回历史修订，源或资格确认不同则拒绝重发
             if (
                 # 新原件与该版本首次生效时的原件不同。
@@ -74,9 +77,11 @@ def publish_policy(document: PolicyDocument, *, publisher: str, qualification: Q
             # 维护者尚未确认上次写操作已结束。
             and not confirm_write_ended
         ):
+
             # region 写入仍待确认时保留现状，等待维护者核对
             raise ValueError('请确认上次发布进程已停止且 Milvus 写入已结束，再使用 --confirm-write-ended')
             # endregion
+
         # endregion
 
         # region 保存改变资格的版本，但在同版本规则就绪前停止发布
@@ -109,6 +114,7 @@ def publish_policy(document: PolicyDocument, *, publisher: str, qualification: Q
                 and existing_entries
             )
             if not adopt_baseline:
+
                 # region 仅对未生效版本标记操作在途，清理并全量重发
                 if existing_entries:
                     raise ValueError('存在缺少发布记录的政策条目，须核对来源后再发布')
@@ -117,6 +123,7 @@ def publish_policy(document: PolicyDocument, *, publisher: str, qualification: Q
                 backend.publish(document.entries)
                 attempt.finish_write()
                 # endregion
+
             _verify_index(document, backend)
         # endregion
 

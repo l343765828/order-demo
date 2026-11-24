@@ -30,6 +30,7 @@ class PublicationConflict(ValueError):
 class MySQLPolicyCatalog(PolicyCatalogReader):
     # 指定保存目录和发布历史的数据库。
     def __init__(self, database: str, mysql: MySQLConfig) -> None:
+
         # region 保存目录所在数据库
         self.database = database
         self.options = connection_config(mysql)
@@ -37,6 +38,7 @@ class MySQLPolicyCatalog(PolicyCatalogReader):
 
     # 显式补齐目录表，保留已有发布历史。
     def initialize(self) -> None:
+
         # region 执行可重复的政策目录建表和初始化脚本
         schema = _SCHEMA.read_text(encoding='utf-8').format(head=PolicyCatalogTables.HEAD,
                                                            releases=PolicyCatalogTables.RELEASES)
@@ -48,6 +50,7 @@ class MySQLPolicyCatalog(PolicyCatalogReader):
 
     # 由首次激活修订重建指定时点每份文档的版本；空目录和未知修订均报错。
     def snapshot(self, revision: int | None = None) -> PolicySnapshot:
+
         # region 在同一次查询中解析修订并选取各文档当时最新生效的版本
         if (
             # 这次读取明确指定了历史修订。
@@ -86,6 +89,7 @@ class MySQLPolicyCatalog(PolicyCatalogReader):
     # 用同一 MySQL 会话锁住同一文档版本，连接结束时自动释放锁。
     @contextmanager
     def lock_version(self, target: PolicyVersion) -> Iterator['PolicyPublicationSession']:
+
         # region 获取版本互斥锁，在释放连接前串行处理该版本
         key = sha256(f'policy:{self.database}:{target.document_id}:{target.version}'.encode()).hexdigest()
         with mysql_connection(self.database, **self.options) as connection, connection.cursor() as cursor:
@@ -100,6 +104,7 @@ class MySQLPolicyCatalog(PolicyCatalogReader):
 class PolicyPublicationSession:
     # 绑定持锁连接及本次发布的文档版本。
     def __init__(self, connection: Connection, target: PolicyVersion) -> None:
+
         # region 保存本次发布的连接和版本
         self.connection = connection
         self.target = target
@@ -107,6 +112,7 @@ class PolicyPublicationSession:
 
     # 读取当前激活的同文档版本，首次发布返回空值。
     def active_version(self) -> str | None:
+
         # region 取该文档最新生效的版本作为并发比较基准
         with self.connection.cursor() as cursor:
             cursor.execute(f'''SELECT version FROM {PolicyCatalogTables.RELEASES}
@@ -118,6 +124,7 @@ class PolicyPublicationSession:
 
     # 核对版本是否曾生效或前一次 Milvus 写入是否还待确认。
     def release(self) -> PolicyRelease | None:
+
         # region 读取已提交的版本发布历史和资格确认
         with self.connection.cursor(DictCursor) as cursor:
             cursor.execute(f'''SELECT document_id, version, source_digest, publisher, qualification,
@@ -130,6 +137,7 @@ class PolicyPublicationSession:
 
     # 记录发布者确认和原件；写入前将未完成标记先提交到 MySQL。
     def record_attempt(self, approval: PolicyPublicationApproval, *, write_state: PolicyWriteState) -> None:
+
         # region 保存可追溯的发布意图和 Milvus 写入状态
         with self.connection.cursor() as cursor:
             cursor.execute(f'''INSERT INTO {PolicyCatalogTables.RELEASES}
@@ -144,6 +152,7 @@ class PolicyPublicationSession:
 
     # 在本次 Milvus 删除和写入均已确认结束后，允许后续校验失败时安全重试。
     def finish_write(self) -> None:
+
         # region 持久记录 Milvus 写入已结束
         with self.connection.cursor() as cursor:
             cursor.execute(f'''UPDATE {PolicyCatalogTables.RELEASES} SET write_state = %s, updated_at = UTC_TIMESTAMP(6)
@@ -153,6 +162,7 @@ class PolicyPublicationSession:
 
     # 以目录行锁串行化修订分配，比较同文档的生效版本并原子切换。
     def activate(self, expected_version: str | None, *, adoption: PolicyPublicationApproval | None = None) -> int:
+
         # region 获取目录行锁并核对验证期间同文档的生效版本
         self.connection.begin()
         with self.connection.cursor(DictCursor) as cursor:

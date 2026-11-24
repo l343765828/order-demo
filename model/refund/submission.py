@@ -76,6 +76,7 @@ class RefundLookupResult(StrictModel):
     # 将 MCP 已校验的只读回执还原为业务模型和枚举。
     @classmethod
     def from_mcp(cls, data: dict[str, Any]) -> Self:
+
         # region 按共享回执契约恢复原退款及查询状态
         refund = data.get("refund")
         return cls.model_construct(status=RefundLookupStatus(data["status"]),
@@ -85,6 +86,7 @@ class RefundLookupResult(StrictModel):
     # 核对退款单与查询是否找到之间的对应关系。
     @model_validator(mode="after")
     def check_refund(self):
+
         # region 确保只有找到原退款时提供原单
         if (self.status is RefundLookupStatus.FOUND) != (self.refund is not None):
             raise ValueError("核对状态与原退款记录不一致")
@@ -104,6 +106,7 @@ class RefundResult(StrictModel):
     # 将 MCP 已校验的执行回执还原为业务模型和枚举。
     @classmethod
     def from_mcp(cls, data: dict[str, Any]) -> Self:
+
         # region 按共享回执契约恢复实际退款、业务状态及原因
         refund = data.get("refund")
         reason = data.get("reason")
@@ -115,6 +118,7 @@ class RefundResult(StrictModel):
     # 限制成功结果附原单，其余结果附原因。
     @model_validator(mode="after")
     def check_result(self):
+
         # region 检查状态与原单及原因的组合
         succeeded = self.status in (RefundOutcome.SIMULATED_SUCCEEDED, RefundOutcome.ALREADY_REFUNDED)
         if (self.refund is not None, self.reason is None) != (succeeded, succeeded):

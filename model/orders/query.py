@@ -47,6 +47,7 @@ class OrderQueryResult(StrictModel):
     # 将 SDK 接收的查单结果恢复为具名模型，供流程按枚举和属性读取。
     @classmethod
     def from_mcp(cls, data: dict[str, Any]) -> Self:
+
         # region 返回包含订单详情时恢复嵌套模型和业务枚举
         details = data.get("order")
         order = None
@@ -57,6 +58,7 @@ class OrderQueryResult(StrictModel):
                 paid_amount_fen=details["paid_amount_fen"], currency=details["currency"],
             )
         # endregion
+
         # region 还原查单状态及可选订单详情和错误信息
         return cls.model_construct(status=OrderQueryStatus(data["status"]), order=order, error=data.get("error"))
         # endregion
@@ -64,6 +66,7 @@ class OrderQueryResult(StrictModel):
     # 校验查询状态、订单详情与错误信息之间的对应关系。
     @model_validator(mode="after")
     def check_result(self):
+
         # region 按查询状态限制对外结果，只有查到本人订单时返回详情
         match self.status:
             case OrderQueryStatus.FOUND if self.order is not None and self.error is None:
