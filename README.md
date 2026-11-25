@@ -11,7 +11,19 @@
 
 ## 环境配置与启动
 
-以下命令在包含 `cli.py` 的项目目录执行。运行 `py -3 -m pip install -r requirements-protocol.txt` 安装依赖，其中包含 SQLAlchemy Core 2.x 与 PyMySQL。在 `config/local.json` 中配置 MySQL 地址和凭据、免鉴权 Qwen 服务地址以及 MCP 读取凭据。Qwen 请求省略 `Authorization` 请求头。MCP 凭据须为至少 32 个可见 ASCII 字符。程序启动时读取该 JSON。
+以下命令在包含 `cli.py` 的项目目录执行。运行 `py -3 -m pip install -r requirements-protocol.txt` 安装依赖，其中包含 SQLAlchemy Core 2.x 与 PyMySQL。在 `config/local.json` 中配置 MySQL、MCP 和模型服务。仓库中的凭据为占位值，部署时在运行副本中填入实际值，并将该副本保存在版本控制之外。MCP 凭据须为至少 32 个可见 ASCII 字符。
+
+Host 和 MCP 服务各自在进程启动时读取 JSON。部署时配套更新程序和 JSON，再重启相应进程。政策发布命令每次启动时读取配置，可用 `--config` 指定文件。
+
+| 配置块 | 必填字段 | 用途 |
+| --- | --- | --- |
+| `qwen` | `base_url`、`model`、`max_completion_tokens`、`timeout` | Host 主模型与调查子 Agent 使用同一配置。请求省略 `Authorization` 请求头。 |
+| `embedding` | `url`、`model`、`timeout` | 政策条目和查询编码。填写完整 HTTP API 地址，例如 `http://embedding.example/bge/v1/embeddings`。 |
+| `reranker` | `url`、`model`、`timeout` | 政策候选重排。填写完整 HTTP API 地址，例如 `http://ranking.example/reranker/v1/rerank`。 |
+
+启用政策时，在 `mysql`、`mcp`、`qwen` 之外填写 `policy`、`embedding` 和 `reranker`。只查单的精简配置可只保留前三个配置块。模型地址须为有效的 HTTP 或 HTTPS URL，模型名须为非空文本，`timeout` 为正整数秒，`max_completion_tokens` 为正整数 token 数。
+
+迁移旧 JSON 时，先补齐 `qwen` 全部字段。原配置依赖默认值时，可沿用 `Qwen/Qwen3-8B`、512 token 和 90 秒。旧 `qwen.api_key` 会被忽略，可删除。使用政策的配置须删除 `policy.model_base`，将该旧地址末尾的斜杠去掉，再分别拼上 `/bge/v1/embeddings` 和 `/reranker/v1/rerank`，填入两个模型的 `url`。分别填写 `BAAI/bge-m3`、`BAAI/bge-reranker-v2-m3` 及 30 秒超时，即可沿用原部署。
 
 CLI 和 MCP 服务各自在进程内复用业务连接池，进程退出时释放。数据库连接使用 UTC 和 `utf8mb4`。主库由 `mysql.database` 指定，默认使用 `order_demo`。`manage.py init`、政策目录初始化和 LangGraph 检查点通过独立 PyMySQL 连接管理。
 
@@ -22,7 +34,9 @@ py -3 manage.py init
 py -3 manage.py seed
 ```
 
-两条命令都可以重复执行，并保留已有数据。初始化会创建缺失的数据库对象，已有表结构不兼容时需另行迁移。种子装载在一个事务内写入缺失的订单，仅当本次成功插入 `DEMO-1003` 时才写入配套模拟退款。任一写入失败时，本次装载回滚。
+两条命令都可以重复执行，并保留已有数据。初始化会创建缺失的数据库对象。种子装载在一个事务内写入缺失的订单，仅当本次成功插入 `DEMO-1003` 时才写入配套模拟退款。任一写入失败时，本次装载回滚。
+
+从含 `currency` 列的版本升级时，先停止使用该库的 Agent 和 MCP 服务，再用新版运行 `py -3 manage.py init`。初始化锁定订单表和退款表，核对两表的历史币种均为 `CNY` 后移除旧列。若命令指出某个表存在异常币种，请核实该表数据后重试。初始化成功后配套启动新版 Agent 和 MCP。实付与退款金额分别沿用 `paid_amount_fen` 和 `amount_fen`，单位为人民币分。已有退款会话可继续读取和恢复。
 
 运行 `py -3 -X utf8 test/verify_mysql.py --config <验收配置>` 进行隔离集成验证。验收配置为工作区外的 JSON，须提供有权创建和清理测试库的 MySQL 账号。脚本先查询实例版本，再创建和清理随机命名的测试库，验证初始化、种子幂等性、事务回滚和进程连接池。
 
@@ -43,7 +57,7 @@ CLI 支持用聊天管理订单状态答复的详略。输入「请记住以后�
 
 ## 退款政策发布与检索
 
-演示政策源位于 `policy/refund-policy.md`。在配置文件的 `policy` 部分填写 Milvus 地址、`milvus_token` 和模型服务地址。Milvus 使用账号密码认证时，令牌格式为 `用户名:密码`。MCP 服务和发布命令使用同一政策目录及索引。隔离验收可配套指定 `catalog_database` 和 `milvus_collection`，默认使用 `order_demo` 和 `order_demo_refund_policy`。每套索引的发布历史由对应的目录管理。未配置 `policy` 时仍可查单。
+演示政策源位于 `policy/refund-policy.md`。在 `policy` 中填写 `milvus_uri` 和 `milvus_token`。Milvus 使用账号密码认证时，令牌格式为 `用户名:密码`。MCP 服务和发布命令对同一份政策发布目录和 Milvus 集合使用同一套部署配置。隔离验收可配套指定 `catalog_database` 和 `milvus_collection`，默认使用 `order_demo` 和 `order_demo_refund_policy`。现存向量继续使用原 Embedding 模型查询。更换 Embedding 模型时需另行重编码并迁移索引。
 
 首次启用目录时，先初始化演示库，再发布演示政策 `1.0`，随后启动新版 MCP 服务。原集合已有 `1.0` 条目时，命令验证原件一致且可检索后登记为目录修订 `1`。
 

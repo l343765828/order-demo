@@ -8,7 +8,6 @@ from model.policy.status import PolicyEntryType, PolicyEvidenceStatus, PolicySea
 # 按同一目录修订下的实际政策条目核对引用；资格和办理仅接受正式条款。
 def verify_policy_evidence(
     evidence: PolicyEvidence, results: list[PolicySearchResult], *, formal_only: bool = True,
-    complete_excerpt: bool = False,
 ) -> bool:
 
     # region 缺少充分依据或本轮目录修订时拒绝核验
@@ -49,12 +48,11 @@ def verify_policy_evidence(
             return False
         key = (citation.event_id, citation.document_id, citation.version, citation.clause_id, entry_type)
         text = sources.get(key, "")
-        excerpt_matches = citation.excerpt == text if complete_excerpt else citation.excerpt in text
         if (
             # 引用摘录为空白，无法作为政策依据。
             not citation.excerpt.strip()
             # 本轮成功回执没有该条目或其原文不包含引用摘录。
-            or not excerpt_matches
+            or citation.excerpt not in text
         ):
             return False
     return bool(evidence.citations)

@@ -126,7 +126,7 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
     policy_event = str(uuid.uuid4())
     details = OrderDetails(order_id="DEMO-1001", payment_status=PaymentStatus.PAID,
                            shipping_status=ShippingStatus.UNSHIPPED, refund_status=RefundStatus.NOT_REFUNDED,
-                           paid_amount_fen=19900, currency="CNY")
+                           paid_amount_fen=19900)
     candidate = PolicyCandidate(document_id="refund", title="Refund policy", version="1.0", clause_id="1",
                                 entry_type=PolicyEntryType.POLICY, text="Policy text")
 
@@ -151,7 +151,7 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
                                   catalog_revision=catalog_revision)
 
     monkeypatch.setattr(server.search, "search_policy", search_policy)
-    monkeypatch.setattr(backend, "PolicyBackend", lambda: policy_backend)
+    monkeypatch.setattr(backend, "PolicyBackend", lambda settings: policy_backend)
     headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25"}
 
     from interfaces.refund.storage import RefundTransactionService
@@ -170,7 +170,7 @@ def test_decorated_tools_keep_the_service_contract(monkeypatch, capsys):
             return RefundResult(status=RefundOutcome.DENIED, reason=RefundReason.INVALID_DISPATCH)
 
     app = server.make_app("test-token", "write-token", order_service=OrderService(), refund_service=RefundService(),
-                          policy_catalog=policy_catalog)
+                          policy_catalog=policy_catalog, open_backend=lambda: backend.open_policy_backend(None))
     http_request_thread = None
 
     async def observe_asgi_thread(scope, receive, send):

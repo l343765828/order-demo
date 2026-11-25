@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS orders (
  order_id VARCHAR(64) PRIMARY KEY, consumer_id VARCHAR(64) NOT NULL,
  payment_status VARCHAR(24) NOT NULL, shipping_status VARCHAR(24) NOT NULL,
- paid_amount_fen BIGINT UNSIGNED NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'CNY',
+ paid_amount_fen BIGINT UNSIGNED NOT NULL,
  created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL,
  KEY idx_orders_consumer (consumer_id, order_id),
  CONSTRAINT chk_order_payment CHECK ((payment_status='unpaid' AND paid_amount_fen=0) OR (payment_status='paid' AND paid_amount_fen>0)),
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS refund_dispatches (
 CREATE TABLE IF NOT EXISTS refunds (
  refund_id VARCHAR(64) PRIMARY KEY, order_id VARCHAR(64) NOT NULL,
  idempotency_key VARCHAR(64) NULL, amount_fen BIGINT UNSIGNED NOT NULL,
- currency CHAR(3) NOT NULL DEFAULT 'CNY', source VARCHAR(24) NOT NULL, created_at DATETIME(6) NOT NULL,
+ source VARCHAR(24) NOT NULL, created_at DATETIME(6) NOT NULL,
  UNIQUE KEY uq_refund_order (order_id), UNIQUE KEY uq_refund_key (idempotency_key),
  UNIQUE KEY uq_refund_id_order (refund_id, order_id),
  CONSTRAINT fk_refund_order FOREIGN KEY (order_id) REFERENCES orders(order_id),

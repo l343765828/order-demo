@@ -9,7 +9,7 @@
     "url": "http://127.0.0.1:8765/mcp",
     "host": "127.0.0.1",
     "port": 8765,
-    "read_token": "w64FvABoC_EhjC3VJswhXWjhZhRqj-rMoitAAwLQASg",
+    "read_token": "replace-with-local-mcp-read-token",
     "write_token": null
   },
   "qwen": {
@@ -20,8 +20,17 @@
   },
   "policy": {
     "milvus_uri": "http://192.168.18.54:31953",
-    "milvus_token": "root:Milvus",
-    "model_base": "http://192.168.18.53:30080"
+    "milvus_token": "root:Milvus"
+  },
+  "embedding": {
+    "url": "http://192.168.18.53:30080/bge/v1/embeddings",
+    "model": "BAAI/bge-m3",
+    "timeout": 30
+  },
+  "reranker": {
+    "url": "http://192.168.18.53:30080/reranker/v1/rerank",
+    "model": "BAAI/bge-reranker-v2-m3",
+    "timeout": 30
   },
   "refund_policy_events_dir": null
 }

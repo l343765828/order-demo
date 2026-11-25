@@ -1,11 +1,11 @@
 """查单流程使用的结构化数据模型。"""
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BeforeValidator, Field, WithJsonSchema, model_validator
 
-from config.limits import RefundLimits
+from config.limits import LegacyCurrency, RefundLimits
 from model.base import StrictModel
 from model.orders.query import OrderQueryResult
 from model.policy.search import PolicyCatalogRevision, PolicySearchResult
@@ -30,6 +30,17 @@ class OrderFlowNode(StrEnum):
     REVIEW_REFUND = "review_refund"  # 固定业务节点重查订单并持久保存最终核验依据。
     SEND_REFUND = "send_refund"  # 固定业务节点持久保存提交并受控发送一次。
     REFUND_REPLY = "refund_reply"  # 将可信退款结果填入消费者回复。
+
+
+# 标识兼容历史币种时读取的退款检查点通道和嵌套字段。
+class RefundCheckpointField(StrEnum):
+    EVENT = "event"  # 调查步骤产生的工具事件。
+    RESULT = "result"  # 工具事件中的查单结果。
+    OBSERVATION = "observation"  # 当前工具事件经核对后的观察。
+    ORDER_RESULT = "order_result"  # 观察中或图状态中独立保存的查单结果。
+    ORDER = "order"  # 成功查单时返回的本人订单详情。
+    REFUND_RESULT = "refund_result"  # 退款办理或原单核对后保存的业务回执。
+    REFUND = "refund"  # 回执中已确认的模拟退款记录。
 
 
 # 保存模型识别的业务意图以及当前消息中的订单号。
@@ -217,6 +228,77 @@ class OrderStateUpdate(StrictModel):
 
 # 将本轮输入与已合并的调查状态提供给图节点，持久化时沿用字典和字符串枚举。
 class OrderState(OrderTurn, OrderStateUpdate):
-    pass
+    # 读取历史图状态时移除已知订单详情及退款回执中的人民币币种。
+    @model_validator(mode="before")
+    @classmethod
+    def read_legacy_amounts(cls, value: object) -> object:
 
+        # region 兼容历史工具事件、调查观察、查单结果及退款回执
+        if not isinstance(value, dict):
+
+            # region 非映射交由状态模型原有校验
+            return value
+            # endregion
+
+        updates = legacy_amount_updates(value)
+        return {**value, **updates} if updates else value
+        # endregion
+
+
+# 提取必须重新写入的历史金额通道，供图状态验证和快照保存共用。
+def legacy_amount_updates(values: dict[str, Any]) -> dict[str, Any]:
+
+    # region 按持久化状态的四种已知形态整理含旧字段的通道
+    updates = {}
+    field = RefundCheckpointField
+    for channel, path in (
+        (field.EVENT, (field.RESULT, field.ORDER)),
+        (field.OBSERVATION, (field.ORDER_RESULT, field.ORDER)),
+        (field.ORDER_RESULT, (field.ORDER,)),
+        (field.REFUND_RESULT, (field.REFUND,)),
+    ):
+        original = values.get(channel)
+        converted = _without_legacy_currency(original, path)
+        if converted is not original:
+
+            # region 仅保存发生升级的通道及其无币种内容
+            updates[channel.value] = converted
+            # endregion
+
+    return updates
+    # endregion
+
+
+# 沿指定快照字段路径移除旧人民币币种，保留原快照与其他字段供原有校验使用。
+def _without_legacy_currency(value: object, path: tuple[RefundCheckpointField, ...]) -> object:
+
+    # region 缺少历史字段时直接复用快照节点
+    if not isinstance(value, dict):
+
+        # region 当前路径没有可转换的历史映射
+        return value
+        # endregion
+
+    if not path:
+
+        # region 仅移除合法的历史人民币值，其余值保留并由严格模型拒绝
+        if value.get(LegacyCurrency.FIELD) != LegacyCurrency.CNY:
+
+            # region 没有旧人民币字段时保留原值
+            return value
+            # endregion
+
+        result = value.copy()
+        del result[LegacyCurrency.FIELD]
+        return result
+        # endregion
+
+    # endregion
+
+    # region 仅在子值转换后复制当前字段映射
+    field, *remaining = path
+    original = value.get(field)
+    converted = _without_legacy_currency(original, tuple(remaining))
+    return value if converted is original else {**value, field.value: converted}
+    # endregion
 

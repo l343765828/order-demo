@@ -17,7 +17,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from pydantic import ValidationError
 
-from config import load_config
+from config import AppConfig
 from config.limits import ConnectionLimits
 from utils.mcp_client import bind_mcp_tool, mcp_correlation_meta, open_mcp_client
 from model.refund.flow import InvestigationStep, OrderToolEvent, PolicyStep, PolicyToolEvent
@@ -261,18 +261,18 @@ async def investigate_order(
     # endregion
 
 
-# 建立 MCP 和模型连接，执行当前只读调查步骤并返回观察。
+# 使用 Host 启动时读取的配置连接 MCP 和模型，执行只读调查并返回观察。
 def execute_order(
     step: InvestigationStep | PolicyStep, trace_id: str, emit: Callable[..., None],
-    *, mode: PolicySearchMode = PolicySearchMode.CONSULTATION,
+    *, settings: AppConfig, mode: PolicySearchMode = PolicySearchMode.CONSULTATION,
 ) -> OrderToolEvent | PolicyToolEvent | None:
 
     # region 定义异步调查所需的 MCP 会话和工具绑定
     # 在异步连接生命周期内绑定当前步骤需要的 MCP 工具。
     async def run():
 
-        # region 载入 MCP 配置并确定本次会话的读取超时
-        mcp = load_config().mcp
+        # region 使用启动时的 MCP 配置并确定本次会话的读取超时
+        mcp = settings.mcp
         read_timeout = ConnectionLimits.POLICY_SESSION_SECONDS if isinstance(step, PolicyStep) else ConnectionLimits.ORDER_CALL_SECONDS
         # endregion
 
@@ -295,7 +295,8 @@ def execute_order(
                         timeout=ConnectionLimits.POLICY_CALL_SECONDS, meta=mcp_correlation_meta(trace_id, event_id))
                     # endregion
 
-                return await investigate_order(create_qwen_client(load_config().qwen, http_async_client=http), step, trace_id, fetch_policy, emit)
+                model = create_qwen_client(settings.qwen, http_async_client=http)
+                return await investigate_order(model, step, trace_id, fetch_policy, emit)
             # endregion
 
             # region 查单步骤绑定只读查单工具并关联订单读取事件
@@ -311,7 +312,8 @@ def execute_order(
                 )
                 # endregion
 
-            return await investigate_order(create_qwen_client(load_config().qwen, http_async_client=http), step, trace_id, fetch, emit)
+            model = create_qwen_client(settings.qwen, http_async_client=http)
+            return await investigate_order(model, step, trace_id, fetch, emit)
             # endregion
 
         # endregion

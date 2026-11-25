@@ -1,12 +1,13 @@
 import pytest
 
 from implementations.refund.intent import resolve_intent
+from implementations.refund.reply import refund_reply
 from langgraph.checkpoint.memory import InMemorySaver
 from model.policy.evidence import PolicyCitation, PolicyEvidence
 from model.policy.status import PolicyEntryType, PolicyEvidenceStatus
 from model.refund.flow import ExchangeMessage, OrderFlowNode
-from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerification
-from model.refund.status import ConversationIntent
+from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerification, RefundResult
+from model.refund.status import ConversationIntent, RefundOutcome, RefundReason
 from utils.checkpoint import thread_config
 from workflows.refund import build_graph
 
@@ -35,6 +36,12 @@ def test_refund_option_preference_does_not_change_unconditional_authorization():
     message = '请帮我办理 DEMO-1005 的退款，我希望只退 1 元到其他账户，使用其他渠道。'
     resolution = resolve_intent([ExchangeMessage(role='user', content=message)], None, decide, lambda *a, **k: None)
     assert resolution.reply is None and resolution.decision.order_id == 'DEMO-1005'
+
+
+def test_unavailable_refund_reply_only_reports_that_no_refund_was_submitted():
+    result = RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.EXECUTION_UNAVAILABLE)
+
+    assert refund_reply(result, lambda *args, **kwargs: None) == "退款服务暂时不可用，未提交退款。"
 
 
 def test_resuming_prepared_checkpoint_without_live_consumer_turn_cannot_send():

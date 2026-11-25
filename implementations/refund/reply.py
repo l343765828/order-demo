@@ -15,7 +15,7 @@ _REASON_REPLIES = {
     RefundReason.POLICY_UNAVAILABLE: "政策依据不足或与订单事实不符，未提交退款。",
     RefundReason.POLICY_NOT_SAVED: "暂时无法确认政策核验事件已保存，未发送退款请求。",
     RefundReason.DISPATCH_NOT_SAVED: "暂时无法确认本次提交已保存，未发送退款请求。",
-    RefundReason.EXECUTION_UNAVAILABLE: "退款服务暂时不可用，未发送退款请求。",
+    RefundReason.EXECUTION_UNAVAILABLE: "退款服务暂时不可用，未提交退款。",
     RefundReason.DATABASE_FAILURE: "本次模拟退款执行失败，未产生退款记录。",
     RefundReason.RECEIPT_UNKNOWN: "本次模拟退款结果未确认。该订单需要核对原结果后才能再次办理。",
 }

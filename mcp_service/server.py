@@ -1,8 +1,8 @@
 """独立 Streamable HTTP 退款业务服务。"""
 
 import argparse
-from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from enum import StrEnum
 from hmac import compare_digest
 from typing import Any
@@ -27,6 +27,7 @@ from implementations.policy.catalog import MySQLPolicyCatalog
 from implementations.refund.transactions import MySQLRefundTransactionService
 from interfaces.orders.query import OrderQueryService
 from interfaces.policy.catalog import PolicyCatalogReader
+from interfaces.policy.search import PolicySearchBackend
 from interfaces.refund.storage import RefundTransactionService
 from mcp_service.policy import search
 from model.orders.query import GetOrderRequest, OrderQueryId
@@ -122,10 +123,11 @@ class _OrderMcpServer(MCPServer):
         # endregion
 
 
-# 创建退款 MCP 应用，分别认证调查及受控执行凭据。
+# 创建退款 MCP 应用，认证调查及受控执行凭据，按请求打开注入的政策后端。
 def make_app(
     token: str, write_token: str | None = None, *,
     order_service: OrderQueryService, refund_service: RefundTransactionService, policy_catalog: PolicyCatalogReader,
+    open_backend: Callable[[], AbstractContextManager[PolicySearchBackend]],
 ) -> ASGIApp:
 
     # region 初始化 MCP 服务和只读工具注解
@@ -212,10 +214,8 @@ def make_app(
     ) -> PolicySearchResult:
 
         # region 按指定范围检索政策并释放后端连接
-        from implementations.policy.backend import open_policy_backend
-
         try:
-            with open_policy_backend() as backend:
+            with open_backend() as backend:
                 result = search.search_policy(query, mode, backend, catalog=policy_catalog,
                                               catalog_revision=catalog_revision)
         except Exception:
@@ -279,6 +279,18 @@ def make_app(
 @contextmanager
 def open_app(settings: AppConfig) -> Iterator[ASGIApp]:
 
+    # region 绑定启动设置，收到政策检索请求时才加载并打开后端
+    # 以已读取的设置打开单次检索使用的政策后端。
+    def open_backend() -> AbstractContextManager[PolicySearchBackend]:
+
+        # region 延后加载政策后端并传入启动配置
+        from implementations.policy.backend import open_policy_backend
+
+        return open_policy_backend(settings)
+        # endregion
+
+    # endregion
+
     # region 按数据库分配连接池并为 MCP 工具注入 Service
     with ExitStack() as resources:
         engine = create_mysql_engine(settings.mysql)
@@ -295,6 +307,7 @@ def open_app(settings: AppConfig) -> Iterator[ASGIApp]:
         yield make_app(
             settings.mcp.read_token, settings.mcp.write_token, order_service=MySQLOrderQueryService(engine),
             refund_service=MySQLRefundTransactionService(engine), policy_catalog=MySQLPolicyCatalog(catalog_engine),
+            open_backend=open_backend,
         )
     # endregion
 

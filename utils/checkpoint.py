@@ -16,11 +16,13 @@ def thread_config(thread_id: str) -> RunnableConfig:
     # endregion
 
 
-# 使用调用方提供的数据库连接参数打开 checkpoint 存储并负责关闭连接。
+# 使用调用方提供的数据库连接和 Saver 类型打开 checkpoint 存储并负责关闭连接。
 @contextmanager
-def open_mysql_checkpointer(database: str, **connection_options) -> Iterator[PyMySQLSaver]:
+def open_mysql_checkpointer(
+    database: str, *, saver_type: type[PyMySQLSaver] = PyMySQLSaver, **connection_options
+) -> Iterator[PyMySQLSaver]:
 
     # region 使用调用方提供的数据库连接参数打开 checkpoint 存储并负责关闭连接
     with mysql_connection(database, **connection_options) as connection:
-        yield PyMySQLSaver(connection)
+        yield saver_type(connection)
     # endregion

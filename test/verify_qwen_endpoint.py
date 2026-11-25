@@ -8,7 +8,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import load_config
-BASE = {"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "Reply OK"}], "max_tokens": 64}
+BASE = {"messages": [{"role": "user", "content": "Reply OK"}], "max_tokens": 64}
 TOOL = {"type": "function", "function": {"name": "probe_echo", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}}
 CASES: dict[str, dict[str, Any]] = {
     "baseline": {},
@@ -19,12 +19,14 @@ CASES: dict[str, dict[str, Any]] = {
 }
 
 def main():
-    url = load_config().qwen.base_url.rstrip("/") + "/chat/completions"
+    settings = load_config().qwen
+    url = settings.base_url.rstrip("/") + "/chat/completions"
     failures = []
     for name, fields in CASES.items():
-        request = urllib.request.Request(url, data=json.dumps({**BASE, **fields}).encode(), headers={"Content-Type": "application/json"})
+        request = urllib.request.Request(url, data=json.dumps({**BASE, "model": settings.model, **fields}).encode(),
+                                         headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:
+            with urllib.request.urlopen(request, timeout=settings.timeout) as response:
                 print(f"{name}: HTTP {response.status}")
         except urllib.error.HTTPError as error:
             # The service currently emits JSON with escaped Chinese but declares no charset.

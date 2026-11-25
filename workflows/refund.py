@@ -137,7 +137,11 @@ def build_graph(
         if state.reply is not None:
             return END
         if state.refund_result is not None:
-            return OrderFlowNode.REFUND_REPLY.value
+
+            # region 已确认资格拒绝时仅继续政策解释，其他结果直接回复
+            return (OrderFlowNode.EXECUTE.value if state.refund_result.is_order_state_denial
+                    else OrderFlowNode.REFUND_REPLY.value)
+            # endregion
         # endregion
 
         # region 已取得本轮正式依据的办理进入固定复核，其余继续调查
@@ -155,12 +159,23 @@ def build_graph(
         return OrderFlowNode.EXECUTE.value
         # endregion
 
-    # 固定复核结束后只可能进入发送或确定性回复。
+    # 固定复核后按最新事实继续解释拒绝、受控发送或回复业务结果。
     def after_review(state: OrderState) -> str:
 
         # region 只允许已确认政策事件进入固定发送
         if state.reply is not None:
             return END
+        if (
+            # 复核取得明确的退款业务结果。
+            state.refund_result is not None
+            # 复核时支付或发货状态不再满足资格。
+            and state.refund_result.is_order_state_denial
+        ):
+
+            # region 最新订单资格被拒后仅执行只读政策检索
+            return OrderFlowNode.EXECUTE.value
+            # endregion
+
         return OrderFlowNode.SEND_REFUND.value if state.refund_verification else OrderFlowNode.REFUND_REPLY.value
         # endregion
 
@@ -168,7 +183,7 @@ def build_graph(
         END, OrderFlowNode.EXECUTE.value, OrderFlowNode.REVIEW_REFUND.value, OrderFlowNode.REFUND_REPLY.value,
     ])
     graph.add_conditional_edges(OrderFlowNode.REVIEW_REFUND.value, after_review, [
-        END, OrderFlowNode.SEND_REFUND.value, OrderFlowNode.REFUND_REPLY.value,
+        END, OrderFlowNode.EXECUTE.value, OrderFlowNode.SEND_REFUND.value, OrderFlowNode.REFUND_REPLY.value,
     ])
     graph.add_edge(OrderFlowNode.SEND_REFUND.value, OrderFlowNode.REFUND_REPLY.value)
     graph.add_edge(OrderFlowNode.REFUND_REPLY.value, END)

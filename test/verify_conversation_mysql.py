@@ -175,7 +175,7 @@ def verify(config_path, cursor):
             saver.setup()
             args = Namespace(session=sid, message=user.content, history=False)
             with pytest.raises(RuntimeError, match='流程中断'):
-                host.run_cli(args, saver, http, conversations=storage,
+                host.run_cli(args, saver, http, settings=load_config(config_path), conversations=storage,
                              dispatches=MySQLRefundDispatchService(engine),
                              preferences=MySQLPreferences(engine, consumer_id=CONSUMER_ID))
         assert messages(cursor, sid) == ((1, 'user', user.content),)

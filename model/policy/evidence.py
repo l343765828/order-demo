@@ -1,23 +1,12 @@
 """咨询政策证据与引用的数据契约。"""
 from typing import Annotated
-from enum import StrEnum
 
 from pydantic import BeforeValidator, Field, model_validator
 
 from model.base import StrictModel
 from model.base import status_schema
 from model.policy.search import PolicyCatalogRevision
-from model.policy.status import PolicyEvidenceStatus, PolicyEntryType
-
-
-# 指定代码确定的订单资格解释需要引用的演示政策条款。
-class EligibilityClause(StrEnum):
-    # 已支付、未发货且未退款的订单适用整单原路退款。
-    ELIGIBLE = 'RF-003'
-    # 未支付或已发货的订单不适用本演示退款。
-    INELIGIBLE = 'RF-004'
-    # 已有模拟退款的订单不可重复办理。
-    ALREADY_REFUNDED = 'RF-009'
+from model.policy.status import PolicyEligibilityOutcome, PolicyEvidenceStatus, PolicyEntryType, PolicyOrderFact
 
 
 # 模型选择实际候选的序号，缺少依据时可建议一次正式条款补查。
@@ -28,12 +17,30 @@ class PolicySelection(StrictModel):
     retry_query: str | None
 
 
-# 从新版正式条款正文识别可执行范围，实际订单资格仍由代码计算。
-class RefundClauseMeaning(StrictModel):
-    # 条款确实允许已支付、未发货且尚未退款的本人订单整单原路退。
-    permits_full_original: bool
-    # 条款另设限制、允许其他办理方式或与上述规则矛盾。
-    changes_eligibility: bool
+# 表示例外触发时必须同时满足的一组事实。
+class EligibilityException(StrictModel):
+    # 同组条件均满足才触发该例外，不同组例外相互独立。
+    conditions: list[Annotated[PolicyOrderFact, BeforeValidator(PolicyOrderFact)]]
+
+
+# 记录从一个实际政策候选中提取的一条独立适用规则。
+class EligibilityRule(StrictModel):
+    # 本次回执候选的原始数组序号。
+    source_index: int
+    # 包含适用条件、例外和结论的连续原文，可按本次回执核对。
+    excerpt: str
+    # 规则要求同时成立的条件；原文明示无附加条件时可为空。
+    conditions: list[Annotated[PolicyOrderFact, BeforeValidator(PolicyOrderFact)]]
+    # 原文中的例外，任意一组成立即排除本规则。
+    exceptions: list[EligibilityException]
+    # 原文给出的结论，退款方式不明确时不得视作整单原路。
+    outcome: Annotated[PolicyEligibilityOutcome, BeforeValidator(PolicyEligibilityOutcome)]
+
+
+# 模型从本轮候选原文提取的规则集合，无法提取时为空。
+class EligibilityExtraction(StrictModel):
+    # 并列适用范围拆为独立规则，保留各自的条件、例外和结论。
+    rules: list[EligibilityRule]
 
 
 # 保存回答所引用的单条政策及本轮检索事件。
@@ -79,3 +86,13 @@ class PolicyEvidence(StrictModel):
             raise ValueError('充分证据必须包含政策引用')
         return self
         # endregion
+
+
+# 保存资格政策核验结果，供调查节点组织答复或补查。
+class EligibilityAnswer(StrictModel):
+    # 核验后的政策引文与出处或冲突说明，None 表示可继续补查。
+    policy_message: str | None
+    # 本轮资格答复使用或无法确认的政策依据。
+    evidence: PolicyEvidence
+    # 缺少充分依据时，建议沿用本轮快照补查的文本。
+    retry_query: str | None

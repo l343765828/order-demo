@@ -80,14 +80,14 @@ def check_seed(config, cursor):
         for seed in seeds:
             seed.result()
     orders, refunds = rows(cursor, 'orders'), rows(cursor, 'refunds')
-    assert [row[:6] for row in orders] == [
-        ('DEMO-1001', 'DEMO-USER-01', 'paid', 'unshipped', 19900, 'CNY'),
-        ('DEMO-1002', 'DEMO-USER-01', 'unpaid', 'unshipped', 0, 'CNY'),
-        ('DEMO-1003', 'DEMO-USER-01', 'paid', 'unshipped', 8800, 'CNY'),
-        ('DEMO-1004', 'DEMO-USER-01', 'paid', 'shipped', 29900, 'CNY'),
-        ('DEMO-2001', 'DEMO-USER-02', 'paid', 'unshipped', 5900, 'CNY'),
+    assert [row[:5] for row in orders] == [
+        ('DEMO-1001', 'DEMO-USER-01', 'paid', 'unshipped', 19900),
+        ('DEMO-1002', 'DEMO-USER-01', 'unpaid', 'unshipped', 0),
+        ('DEMO-1003', 'DEMO-USER-01', 'paid', 'unshipped', 8800),
+        ('DEMO-1004', 'DEMO-USER-01', 'paid', 'shipped', 29900),
+        ('DEMO-2001', 'DEMO-USER-02', 'paid', 'unshipped', 5900),
     ]
-    assert [row[:6] for row in refunds] == [('MOCK-RF-1003', 'DEMO-1003', None, 8800, 'CNY', 'seed')]
+    assert [row[:5] for row in refunds] == [('MOCK-RF-1003', 'DEMO-1003', None, 8800, 'seed')]
     run_manage(config, 'seed')
     assert rows(cursor, 'orders') == orders and rows(cursor, 'refunds') == refunds
     print('两进程并发装载后仅持久化五笔订单与一笔配套退款，重跑保留全部字段', flush=True)
@@ -136,8 +136,8 @@ def check_initialization(config, cursor):
 
 
 def check_constraints(cursor):
-    cursor.execute("INSERT INTO orders VALUES ('o1','u','paid','unshipped',19900,'CNY',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)),"
-                   "('o2','u','paid','unshipped',5900,'CNY',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
+    cursor.execute("INSERT INTO orders VALUES ('o1','u','paid','unshipped',19900,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)),"
+                   "('o2','u','paid','unshipped',5900,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
     cursor.execute("INSERT INTO conversation_sessions VALUES ('s','u',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
     cursor.execute("INSERT INTO conversation_messages VALUES ('s',1,'user','授权',UTC_TIMESTAMP(6))")
     insert = ("INSERT INTO refund_dispatches (idempotency_key,order_id,session_id,source_message_sequence,status,trace_id,"
@@ -158,9 +158,9 @@ def check_constraints(cursor):
     cursor.execute(insert, ('other', 'o2', 1, 'pending'))
     cursor.execute("UPDATE refund_dispatches SET status='closed_no_refund' WHERE idempotency_key='d1'")
     cursor.execute(insert, ('d2', 'o1', 1, 'unconfirmed'))
-    cursor.execute("INSERT INTO refunds VALUES ('r1','o1','d2',19900,'CNY','execution',UTC_TIMESTAMP(6))")
-    reject("INSERT INTO refunds VALUES ('r2','o1',NULL,19900,'CNY','seed',UTC_TIMESTAMP(6))", (), 1062)
-    reject("INSERT INTO refunds VALUES ('r2','o2','d2',5900,'CNY','execution',UTC_TIMESTAMP(6))", (), 1062)
+    cursor.execute("INSERT INTO refunds VALUES ('r1','o1','d2',19900,'execution',UTC_TIMESTAMP(6))")
+    reject("INSERT INTO refunds VALUES ('r2','o1',NULL,19900,'seed',UTC_TIMESTAMP(6))", (), 1062)
+    reject("INSERT INTO refunds VALUES ('r2','o2','d2',5900,'execution',UTC_TIMESTAMP(6))", (), 1062)
     reject("UPDATE refund_dispatches SET refund_id='r1' WHERE idempotency_key='other'", (), 1452)
     print('外键、重复键、未决限制和独立订单约束通过', flush=True)
 

@@ -1,0 +1,13 @@
+{"case": "mysql_version", "version": "8.0.46"}
+{"case": "migration_rejected", "table": "refunds", "message": "refunds 存在非 CNY 的历史币种。请核实后再运行初始化。", "columns_and_business_rows_preserved": true}
+{"case": "migration_rejected", "table": "orders", "message": "orders 存在非 CNY 的历史币种。请核实后再运行初始化。", "columns_and_business_rows_preserved": true}
+{"case": "migrated", "schema": {"orders": ["order_id", "consumer_id", "payment_status", "shipping_status", "paid_amount_fen", "created_at", "updated_at"], "refunds": ["refund_id", "order_id", "idempotency_key", "amount_fen", "source", "created_at"]}, "rows_preserved": [6, 2, 1], "paid_amount_fen": 19900, "amount_fen": 8800, "executed_refund_and_dispatch_preserved": true, "repeat_init_passed": true}
+{"case": "policy_published", "catalog_revision": 1, "milvus": "3.0.2", "model": "Qwen/Qwen3-8B"}
+{"case": "legacy_checkpoint_read", "kind": "original", "pending_nodes": [], "legacy_currency_fields": 4, "history": ["user：请帮我退 DEMO-1003", "assistant：该订单已完成模拟退款，退款金额 ¥88.00，模拟退款单号 MOCK-RF-1003。"]}
+{"case": "legacy_checkpoint_read", "kind": "pending", "pending_nodes": ["send_refund"], "legacy_currency_fields": 3, "history": ["user：请帮我退 DEMO-1001"]}
+{"case": "order_cli", "reply": "订单 DEMO-1001：已支付，未发货，无模拟退款记录，实付 19900 分。", "mcp": {"status": "found", "order": {"order_id": "DEMO-1001", "payment_status": "paid", "shipping_status": "unshipped", "refund_status": "not_refunded", "paid_amount_fen": 19900}, "error": null}}
+{"case": "original_refund_cli", "reply": "该订单已完成模拟退款。订单 DEMO-1003，退款金额 ¥88.00，模拟退款单号 MOCK-RF-1003。", "mcp": {"status": "found", "refund": {"order_id": "DEMO-1003", "refund_id": "MOCK-RF-1003", "amount_fen": 8800}}, "original_record_preserved": true, "new_checkpoints_checked": 8, "new_checkpoint_currency_fields": 0}
+{"case": "resumed_refund_cli", "reply": "模拟退款成功。订单 DEMO-1001，退款金额 ¥199.00，模拟退款单号 MOCK-RF-f0b3eaf3b7b84650831dd0406cd123ff。", "mcp": {"status": "simulated_succeeded", "refund": {"order_id": "DEMO-1001", "refund_id": "MOCK-RF-f0b3eaf3b7b84650831dd0406cd123ff", "amount_fen": 19900}, "reason": null}, "new_authorization_message": "继续，请帮我退 DEMO-1001", "refunds_created": 1, "new_checkpoints_checked": 13, "new_checkpoint_currency_fields": 0}
+{"case": "independent_mcp", "agent_pid": 178324, "mcp_pid": 166644, "writes": 1, "real_policy_search": true}
+{"case": "fresh_schema", "schema": {"orders": ["order_id", "consumer_id", "payment_status", "shipping_status", "paid_amount_fen", "created_at", "updated_at"], "refunds": ["refund_id", "order_id", "idempotency_key", "amount_fen", "source", "created_at"]}, "seed_amount_fen": 8800}
+{"case": "cleanup", "mysql_databases_removed": true, "milvus_collection_removed": true}

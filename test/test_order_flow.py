@@ -61,7 +61,7 @@ def test_graph_rejects_invalid_plan_before_dispatch(plan):
 @pytest.mark.parametrize("result_data, action, reply", [
     ({"status": "found", "order": {
         "order_id": "DEMO-1001", "payment_status": "paid", "shipping_status": "unshipped",
-        "refund_status": "not_refunded", "paid_amount_fen": 19900, "currency": "CNY",
+        "refund_status": "not_refunded", "paid_amount_fen": 19900,
     }}, "finish", "订单 DEMO-1001：已支付，未发货，无模拟退款记录，实付 19900 分。"),
     ({"status": "unavailable"}, "finish", "未找到可操作的订单。"),
     ({"status": "failed", "error": "查询服务不可用"}, "fail", "订单服务暂时不可用，请稍后再试。"),
@@ -105,13 +105,35 @@ def test_typed_graph_continues_legacy_checkpoint_without_losing_partial_updates(
     session = "old-conversation"
     config = {"configurable": {"thread_id": session}}
     previous = [{"role": "user", "content": "能退吗"}, {"role": "assistant", "content": "请提供订单号"}]
+    legacy_order = {"status": "found", "order": {
+        "order_id": "DEMO-1003", "payment_status": "paid", "shipping_status": "unshipped",
+        "refund_status": "refunded", "paid_amount_fen": 8800, "currency": "CNY",
+    }}
     graph.update_state(config, {"history": previous, "trace_id": "old-turn", "eligibility_question": "能退吗",
                                 "decision": {"intent": "order_question", "order_id": None, "order_goal": "eligibility"},
-                                "reply": "请提供订单号"}, as_node="intent")
+                                "reply": "请提供订单号", "order_result": legacy_order,
+                                "event": {"event_id": "old-event", "trace_id": "old-turn",
+                                          "model_tool_call_id": "old-call", "order_id": "DEMO-1003",
+                                          "result": legacy_order},
+                                "observation": {"step_id": "old-order", "status": "completed",
+                                                "tool_event_id": "old-event", "order_result": legacy_order},
+                                "refund_result": {"status": "already_refunded", "refund": {
+                                    "order_id": "DEMO-1003", "refund_id": "MOCK-RF-1003",
+                                    "amount_fen": 8800, "currency": "CNY",
+                                }}}, as_node="refund_reply")
     snapshot, _ = load_refund_state(graph, session)
     assert snapshot is not None
     assert snapshot.history[0].content == "能退吗"
     assert snapshot.decision is not None and snapshot.decision.order_goal == "eligibility"
+    saved = snapshot.model_dump(mode="json")
+    order = dict(legacy_order["order"])
+    del order["currency"]
+    assert saved["event"]["result"]["order"] == order
+    assert saved["observation"]["order_result"]["order"] == order
+    assert saved["order_result"]["order"] == order
+    assert saved["refund_result"]["refund"] == {
+        "order_id": "DEMO-1003", "refund_id": "MOCK-RF-1003", "amount_fen": 8800,
+    }
 
     turn = OrderTurn(history=[*snapshot.history, ExchangeMessage(role="user", content="DEMO-1001")],
                      trace_id="new-turn")

@@ -34,10 +34,11 @@ if __name__ == '__main__':
         PolicyBackend.recall = recall_with_empty_consultation
     if '--pause-supplement' in sys.argv[3:]:
         folder = Path(sys.argv[sys.argv.index('--pause-supplement') + 1])
+        trigger = sys.argv[sys.argv.index('--supplement-query') + 1] if '--supplement-query' in sys.argv else '教学印章'
         original_search = search.search_policy
 
         def pause_supplement(query, mode, backend, **options):
-            if '教学印章' in query and mode is PolicySearchMode.CONSULTATION and not (folder / 'armed').exists():
+            if trigger in query and mode is PolicySearchMode.CONSULTATION and not (folder / 'armed').exists():
                 (folder / 'armed').touch()
                 with patch.object(backend, 'recall', lambda *args: empty_recall(backend, *args)):
                     return original_search(query, mode, backend, **options)
@@ -45,7 +46,7 @@ if __name__ == '__main__':
                 pending = folder / 'pending'
                 pending.write_text(str(options['catalog_revision']), encoding='ascii')
                 pending.replace(folder / 'before-supplement')
-                deadline = time.monotonic() + 45
+                deadline = time.monotonic() + 55
                 while not (folder / 'resume').exists():
                     if time.monotonic() >= deadline:
                         raise TimeoutError('publisher did not release the supplement')

@@ -20,7 +20,7 @@ def _receipt(record: RefundRecord) -> RefundReceipt:
 
     # region 提取对外回执字段
     return RefundReceipt(order_id=record.order_id, refund_id=record.refund_id,
-                         amount_fen=record.amount_fen, currency=record.currency)
+                         amount_fen=record.amount_fen)
     # endregion
 
 
@@ -81,7 +81,7 @@ def _execute(connection: Connection, *, request: SubmitMockRefundRequest, consum
         # endregion
 
     receipt = RefundReceipt(order_id=order.order_id, refund_id=f"{MOCK_REFUND_ID_PREFIX}{uuid4().hex}",
-                            amount_fen=order.paid_amount_fen, currency=order.currency)
+                            amount_fen=order.paid_amount_fen)
     refund_repository.insert_refund(connection, receipt=receipt, key=request.idempotency_key,
                                     source=RefundSource.EXECUTION)
     return RefundResult(status=RefundOutcome.SIMULATED_SUCCEEDED, refund=receipt)

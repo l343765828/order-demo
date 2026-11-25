@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import httpx
 
-from config import load_config
+from config import AppConfig
 from config.demo import CONSUMER_ID
 from implementations.refund.conversations import MySQLConversationService
 from implementations.refund.decision import QwenDecider
@@ -22,14 +22,14 @@ from utils.qwen_client import create_qwen_client
 from workflows.refund import build_graph, load_refund_state, run_refund_turn
 
 
-# 载入或创建消费者会话，处理交互消息并保存原文与检查点。
+# 按启动配置载入或创建消费者会话，处理消息并保存原文与检查点。
 def run_cli(
     args, saver, http: httpx.Client, *,
-    conversations: MySQLConversationService, dispatches: RefundDispatchService, preferences: ManagePreferences,
+    settings: AppConfig, conversations: MySQLConversationService,
+    dispatches: RefundDispatchService, preferences: ManagePreferences,
 ) -> int:
 
     # region 创建模型客户端并确定会话编号
-    settings = load_config()
     model = create_qwen_client(settings.qwen, http_client=http)
     session_id = args.session or conversations.create(CONSUMER_ID)
     trace_id: str | None = None
@@ -48,7 +48,7 @@ def run_cli(
     def investigate(step: InvestigationStep, trace_id: str) -> OrderToolEvent | None:
 
         # region 将已验证的查单步骤交给订单调查执行器
-        event = execute_order(step, trace_id, emit)
+        event = execute_order(step, trace_id, emit, settings=settings)
         return event if isinstance(event, OrderToolEvent) else None
         # endregion
 
@@ -56,7 +56,7 @@ def run_cli(
     def search(step: PolicyStep, trace_id: str, mode: PolicySearchMode) -> PolicyToolEvent | None:
 
         # region 按外层流程指定的范围执行政策调查
-        event = execute_order(step, trace_id, emit, mode=mode)
+        event = execute_order(step, trace_id, emit, settings=settings, mode=mode)
         return event if isinstance(event, PolicyToolEvent) else None
         # endregion
 

@@ -96,8 +96,13 @@ async def verify_mcp(mcp, cursor):
             assert (await client.session.call_tool('submit_mock_refund', {
                 'order_id': 'DEMO-1001', 'idempotency_key': 'absent-dispatch',
             })).is_error
-            cursor.execute('UPDATE orders SET currency=%s WHERE order_id=%s', ('USD', SPECIAL_ORDER))
-            assert (await get_order(SPECIAL_ORDER)).model_dump(mode='json') == FAILURE
+            cursor.execute('ALTER TABLE orders ALTER CHECK chk_order_shipping NOT ENFORCED')
+            try:
+                cursor.execute("UPDATE orders SET shipping_status='invalid' WHERE order_id=%s", (SPECIAL_ORDER,))
+                assert (await get_order(SPECIAL_ORDER)).model_dump(mode='json') == FAILURE
+            finally:
+                cursor.execute("UPDATE orders SET shipping_status='unshipped' WHERE order_id=%s", (SPECIAL_ORDER,))
+                cursor.execute('ALTER TABLE orders ALTER CHECK chk_order_shipping ENFORCED')
             cursor.execute('RENAME TABLE refunds TO refunds_core01_fault')
             try:
                 assert (await get_order('DEMO-1001')).model_dump(mode='json') == FAILURE

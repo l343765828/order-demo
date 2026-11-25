@@ -54,7 +54,9 @@ def main():
         check_policy_storage(mysql, cursor)
         settings = json.loads(config.read_text(encoding="utf-8"))
         settings["policy"] = dict(milvus_uri="http://127.0.0.1:1", milvus_token="local-probe",
-                                  model_base="http://127.0.0.1:1", catalog_database=mysql.database)
+                                  catalog_database=mysql.database)
+        settings["embedding"] = dict(url="http://127.0.0.1:1/encode", model="probe-embed", timeout=1)
+        settings["reranker"] = dict(url="http://127.0.0.1:1/rank", model="probe-rank", timeout=1)
         config.write_text(json.dumps(settings), encoding="utf-8")
         with order_mcp_process(config):
             print("refund:", check_server(config, cursor)["case"], flush=True)

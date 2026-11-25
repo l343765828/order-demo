@@ -4,7 +4,8 @@ from collections.abc import Callable
 from typing import cast
 
 from interfaces.refund.decision import Decide, Decision
-from model.policy.evidence import PolicySelection
+from model.policy.evidence import EligibilityExtraction, PolicySelection
+from model.policy.status import PolicyEvent
 from model.refund.flow import BusinessConversationDecision, ConversationDecision
 from utils.qwen_client import QwenChatOpenAI
 
@@ -36,5 +37,11 @@ class QwenDecider(Decide):
         decision = cast(Decision, self.model.with_structured_output(schema, method="json_schema", strict=True).invoke(prompt))
         if isinstance(decision, PolicySelection):
             self.emit("policy_selection", selection=decision.model_dump())
+        if isinstance(decision, EligibilityExtraction):
+
+            # region 记录资格候选的结构化提取结果，供本轮依据追溯
+            self.emit(PolicyEvent.ELIGIBILITY_EXTRACTION.value, extraction=decision.model_dump(mode="json"))
+            # endregion
+
         return decision
         # endregion

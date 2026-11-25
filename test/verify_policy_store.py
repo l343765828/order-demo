@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from implementations.policy.source import parse_policy
 from implementations.policy.backend import PolicyBackend
-from config import use_config
+from config import load_config
 from config.demo import DemoPolicy
 from model.policy.catalog import PolicyVersion
 from model.policy.search import PolicyEntry
@@ -17,8 +17,7 @@ from model.policy.status import PolicySearchMode
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', help='JSON 配置文件路径')
-    use_config(parser.parse_args().config)
-    backend = PolicyBackend()
+    backend = PolicyBackend(load_config(parser.parse_args().config))
     try:
         client = backend.client
         backend.create_collection()

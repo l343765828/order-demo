@@ -118,13 +118,13 @@ def main():
             for sql in (ROOT / 'model' / 'schema.sql').read_text(encoding='utf-8-sig').split(';'):
                 if sql.strip():
                     cur.execute(sql)
-            cur.execute("INSERT INTO orders VALUES ('sentinel','consumer','paid','unshipped',19900,'CNY',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
+            cur.execute("INSERT INTO orders VALUES ('sentinel','consumer','paid','unshipped',19900,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
             cur.execute("INSERT INTO conversation_sessions VALUES ('session','consumer',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
             cur.execute("INSERT INTO conversation_messages VALUES ('session',1,'user','sentinel',UTC_TIMESTAMP(6))")
             cur.execute("INSERT INTO conversation_summaries VALUES ('session',1,1,'sentinel','event',UTC_TIMESTAMP(6))")
             cur.execute("INSERT INTO consumer_preferences VALUES ('consumer','language','sentinel',UTC_TIMESTAMP(6))")
             cur.execute("INSERT INTO refund_dispatches (idempotency_key,order_id,session_id,source_message_sequence,status,trace_id,created_at,updated_at) VALUES ('dispatch','sentinel','session',1,'closed_no_refund','trace',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))")
-            cur.execute("INSERT INTO refunds VALUES ('refund','sentinel',NULL,19900,'CNY','seed',UTC_TIMESTAMP(6))")
+            cur.execute("INSERT INTO refunds VALUES ('refund','sentinel',NULL,19900,'seed',UTC_TIMESTAMP(6))")
         config_args = ['--config', str(args.config)] if args.config is not None else []
         for stage in ('write', 'resume', 'cleanup'):
             subprocess.run([sys.executable, __file__, *config_args, stage, name], check=True)

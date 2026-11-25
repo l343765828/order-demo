@@ -5,7 +5,7 @@ import json
 
 import httpx
 from pymilvus import DataType, MilvusClient
-from config import load_config
+from config import AppConfig
 from config.limits import PolicyLimits
 from interfaces.policy.search import PolicySearchBackend
 from model.policy.catalog import PolicyVersion
@@ -26,16 +26,25 @@ def version_filter(target: PolicyVersion) -> str:
 
 # 连接固定政策集合及配置文件中的向量、重排服务。
 class PolicyBackend(PolicySearchBackend):
-    # 创建独立客户端，不为模型调用暴露数据库参数。
-    def __init__(self):
+    # 用调用方启动时读取的设置创建 Milvus 客户端，并保存两种模型配置。
+    def __init__(self, settings: AppConfig):
 
-        # region 创建独立客户端，不为模型调用暴露数据库参数
-        policy = load_config().policy
+        # region 检查是否启用政策后端
+        policy, embedding, reranker = settings.policy, settings.embedding, settings.reranker
         if policy is None:
+
+            # region 未启用政策时拒绝创建政策后端
             raise ValueError('配置文件缺少 policy 设置')
+            # endregion
+
+        assert embedding is not None and reranker is not None
+        # endregion
+
+        # region 连接指定的 Milvus 集合并保存独立的模型设置
         self.client = MilvusClient(uri=policy.milvus_uri, token=policy.milvus_token, timeout=PolicyLimits.MILVUS_CONNECT_TIMEOUT_SECONDS)
-        self.base = policy.model_base.rstrip('/')
         self.collection = policy.milvus_collection
+        self.embedding = embedding
+        self.reranker = reranker
         # endregion
 
     # 关闭 Milvus 连接。
@@ -45,12 +54,12 @@ class PolicyBackend(PolicySearchBackend):
         self.client.close()
         # endregion
 
-    # 用 BGE-M3 编码文本，返回符合政策维度的归一化向量。
+    # 用部署所选模型编码文本，返回符合政策维度的归一化向量。
     def embed(self, text: str) -> list[float]:
 
-        # region 请求 BGE-M3 编码并从响应中提取向量
-        with httpx.Client(timeout=PolicyLimits.MODEL_TIMEOUT_SECONDS, trust_env=False) as http:
-            response = http.post(self.base + '/bge/v1/embeddings', json={'model': 'BAAI/bge-m3', 'input': [text]})
+        # region 请求配置中的向量服务并从响应中提取向量
+        with httpx.Client(timeout=self.embedding.timeout, trust_env=False) as http:
+            response = http.post(self.embedding.url, json={'model': self.embedding.model, 'input': [text]})
             response.raise_for_status()
             values = response.json()['data'][0]['embedding']
         # endregion
@@ -88,9 +97,9 @@ class PolicyBackend(PolicySearchBackend):
     def rerank(self, query: str, candidates: list[PolicyEntry]) -> list[PolicyEntry]:
 
         # region 将本轮候选原文与查询一起送重排
-        with httpx.Client(timeout=PolicyLimits.MODEL_TIMEOUT_SECONDS, trust_env=False) as http:
-            response = http.post(self.base + '/reranker/v1/rerank', json={
-                'model': 'BAAI/bge-reranker-v2-m3', 'query': query,
+        with httpx.Client(timeout=self.reranker.timeout, trust_env=False) as http:
+            response = http.post(self.reranker.url, json={
+                'model': self.reranker.model, 'query': query,
                 'documents': [item.text for item in candidates]})
             response.raise_for_status()
             results = response.json()['results']
@@ -224,10 +233,10 @@ class PolicyBackend(PolicySearchBackend):
 
 # 在检索或发布需要使用 Milvus 时创建并释放后端连接。
 @contextmanager
-def open_policy_backend() -> Iterator[PolicyBackend]:
+def open_policy_backend(settings: AppConfig) -> Iterator[PolicyBackend]:
 
     # region 创建政策后端并在使用结束后释放连接
-    backend = PolicyBackend()
+    backend = PolicyBackend(settings)
     try:
         yield backend
     finally:

@@ -23,7 +23,7 @@ def test_result_cannot_leak_order_on_unavailable():
         OrderQueryResult.model_validate({'status': 'unavailable', 'order': {
             'order_id': 'DEMO-2001', 'payment_status': 'paid',
             'shipping_status': 'unshipped', 'refund_status': 'not_refunded',
-            'paid_amount_fen': 19900, 'currency': 'CNY',
+            'paid_amount_fen': 19900,
         }})
 
 
@@ -33,7 +33,7 @@ def test_result_cannot_leak_order_on_unavailable():
     {'status': 'failed', 'error': '错误', 'order': {
         'order_id': 'DEMO-1001', 'payment_status': 'paid',
         'shipping_status': 'unshipped', 'refund_status': 'not_refunded',
-        'paid_amount_fen': 19900, 'currency': 'CNY',
+        'paid_amount_fen': 19900,
     }},
 ])
 def test_result_rejects_inconsistent_status(payload):
@@ -63,7 +63,7 @@ def test_order_statuses_round_trip_the_existing_payload():
     payload = {'status': 'found', 'error': None, 'order': {
         'order_id': 'DEMO-1001', 'payment_status': 'paid',
         'shipping_status': 'unshipped', 'refund_status': 'not_refunded',
-        'paid_amount_fen': 19900, 'currency': 'CNY',
+        'paid_amount_fen': 19900,
     }}
     result = OrderQueryResult.model_validate(payload)
     assert result.order is not None

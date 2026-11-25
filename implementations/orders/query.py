@@ -47,6 +47,6 @@ class MySQLOrderQueryService(OrderQueryService):
         refund_status = RefundStatus.REFUNDED if row.refund_id is not None else RefundStatus.NOT_REFUNDED
         return OrderQueryResult(status=OrderQueryStatus.FOUND, order=OrderDetails(
             order_id=row.order_id, payment_status=row.payment_status, shipping_status=row.shipping_status,
-            paid_amount_fen=row.paid_amount_fen, currency=row.currency, refund_status=refund_status,
+            paid_amount_fen=row.paid_amount_fen, refund_status=refund_status,
         ))
         # endregion

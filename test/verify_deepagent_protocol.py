@@ -5,7 +5,6 @@ import json
 import os
 import tempfile
 import uuid
-from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -61,7 +60,7 @@ async def run(url: str, log: Path) -> None:
             observations[call_id] = data
             return data.model_dump_json()
 
-        model = create_qwen_client(replace(load_config().qwen, timeout=120), http_async_client=http)
+        model = create_qwen_client(load_config().qwen, http_async_client=http)
         agent = create_deep_agent(
             model=model,
             system_prompt="Delegate the user request to echo-worker using task. Return the worker's answer.",

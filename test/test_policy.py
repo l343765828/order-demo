@@ -1,6 +1,10 @@
+import json
 import sys
 import unittest
 from pathlib import Path
+
+import httpx
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.limits import PolicyLimits
@@ -98,6 +102,68 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(backend.client.rows[0]['clause_id'], 'RF-001')
         self.assertEqual(backend.client.rows[0]['text'], '标题\n正文')
         self.assertEqual(len(backend.client.rows[0]['embedding']), 1024)
+
+
+@pytest.mark.parametrize('scenario', ['ranked', 'empty', 'bad_vector', 'bad_indexes', 'http_error'])
+def test_policy_model_requests_and_fallback(monkeypatch, scenario):
+    from config import AppConfig, EmbeddingConfig, MCPConfig, MySQLConfig, PolicyConfig, QwenConfig, RerankerConfig
+    from implementations.policy import backend
+    from mcp_service.policy.search import search_policy
+
+    entries = parse_policy('## RF-001 — 标题一\n\n正文一\n\n## RF-002 — 标题二\n\n正文二')
+    settings = AppConfig(
+        mysql=MySQLConfig('db', 3306, 'demo', 'sample'),
+        mcp=MCPConfig('http://mcp.test/mcp', 8765, 'x' * 32),
+        qwen=QwenConfig(base_url='http://qwen.test/v1', model='chat', timeout=10, max_completion_tokens=64),
+        policy=PolicyConfig(milvus_uri='http://milvus.test', milvus_token='sample'),
+        embedding=EmbeddingConfig(url='http://embed.test:9010/custom/encode?api=1', model='encoder', timeout=7),
+        reranker=RerankerConfig(url='https://rank.test:9020/custom/sort', model='ranker', timeout=13),
+    )
+
+    class Milvus:
+        def search(self, *args, **kwargs):
+            return [[] if scenario == 'empty' else [{'entity': entry.model_dump()} for entry in entries]]
+
+    class Catalog:
+        def snapshot(self, revision):
+            return PolicySnapshot(revision=1, versions=[PolicyVersion(
+                document_id=entries[0].document_id, version=entries[0].version,
+            )])
+
+    calls = []
+    real_client = httpx.Client
+
+    def client(*, timeout, trust_env):
+        assert not trust_env
+
+        def respond(request):
+            body = json.loads(request.content)
+            calls.append((str(request.url), body, request.extensions['timeout']['read']))
+            if request.url.host == 'embed.test':
+                vector = [1.0] if scenario == 'bad_vector' else [1.0] + [0.0] * 1023
+                return httpx.Response(200, json={'data': [{'embedding': vector}]})
+            if scenario == 'http_error':
+                return httpx.Response(503)
+            indexes = [1, 2] if scenario == 'bad_indexes' else [1, 0]
+            return httpx.Response(200, json={'results': [{'index': index} for index in indexes]})
+
+        return real_client(timeout=timeout, trust_env=trust_env, transport=httpx.MockTransport(respond))
+
+    def milvus_client(*, uri, token, timeout):
+        assert (uri, token, timeout) == ('http://milvus.test', 'sample', PolicyLimits.MILVUS_CONNECT_TIMEOUT_SECONDS)
+        return Milvus()
+
+    monkeypatch.setattr(backend, 'MilvusClient', milvus_client)
+    monkeypatch.setattr(backend.httpx, 'Client', client)
+    result = search_policy('退款', PolicySearchMode.FORMAL, backend.PolicyBackend(settings), catalog=Catalog())
+    expected = [('http://embed.test:9010/custom/encode?api=1', {'model': 'encoder', 'input': ['退款']}, 7)]
+    if scenario in {'ranked', 'bad_indexes', 'http_error'}:
+        expected.append(('https://rank.test:9020/custom/sort',
+                         {'model': 'ranker', 'query': '退款', 'documents': ['标题一\n正文一', '标题二\n正文二']}, 13))
+    assert calls == expected
+    assert [item.clause_id for item in result.candidates] == (['RF-002', 'RF-001'] if scenario == 'ranked' else [])
+    assert result.status is (PolicySearchStatus.OK if scenario in {'ranked', 'empty'} else PolicySearchStatus.FAILED)
+
 
 class PolicyRequestTests(unittest.TestCase):
     def test_request_rejects_backend_settings_and_unknown_mode(self):

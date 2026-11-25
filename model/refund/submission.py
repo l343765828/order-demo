@@ -1,7 +1,7 @@
 """模拟退款执行、结果核对与跨服务提交契约。"""
 
 from datetime import datetime
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Self
 
 from pydantic import BeforeValidator, Field, model_validator
 
@@ -60,10 +60,8 @@ class RefundReceipt(StrictModel):
     order_id: OrderQueryId
     # 模拟退款单号，可用于查询现有记录。
     refund_id: RefundIdentifier
-    # 实际退款金额，单位为人民币分。
+    # 本次模拟退款金额，单位为人民币分。
     amount_fen: int = Field(gt=0)
-    # 本演示固定人民币退款。
-    currency: Literal["CNY"]
 
 
 # 表示只读核对的结果，只有找到时附带原退款记录。
@@ -102,6 +100,14 @@ class RefundResult(StrictModel):
     refund: RefundReceipt | None = None
     # 未确认成功时的业务原因。
     reason: Annotated[RefundReason, BeforeValidator(RefundReason)] | None = None
+
+    # 区分本人订单因支付或发货状态被拒的结果，此类拒绝可继续只读检索政策。
+    @property
+    def is_order_state_denial(self) -> bool:
+
+        # region 根据办理结果及原因识别需要解释的资格拒绝
+        return self.status is RefundOutcome.DENIED and self.reason in (RefundReason.UNPAID, RefundReason.SHIPPED)
+        # endregion
 
     # 将 MCP 已校验的执行回执还原为业务模型和枚举。
     @classmethod

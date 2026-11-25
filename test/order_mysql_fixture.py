@@ -18,7 +18,7 @@ from launch_with_config import application_command
 from utils.mysql import connection_config
 
 @contextmanager
-def isolated_order_database(source, *, allow_write=False, seed=True):
+def isolated_order_database(source, *, allow_write=False, seed=True, initialize=True):
     settings = load_config(source)
     database = f'order_demo_core01_{uuid4().hex[:12]}'
     with tempfile.TemporaryDirectory(prefix='order-core01-') as folder, pymysql.connect(
@@ -31,27 +31,29 @@ def isolated_order_database(source, *, allow_write=False, seed=True):
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
         path = Path(folder) / 'settings.json'
-        payload = asdict(settings)
-        payload['mysql']['database'] = database
-        payload['mcp'] = {'url': f'http://127.0.0.1:{port}/mcp', 'port': port,
-                          'read_token': secrets.token_urlsafe(32)}
+        payload = {
+            'mysql': {**asdict(settings.mysql), 'database': database},
+            'qwen': settings.qwen.model_dump(),
+            'mcp': {'url': f'http://127.0.0.1:{port}/mcp', 'port': port, 'read_token': secrets.token_urlsafe(32)},
+        }
         if allow_write:
             payload['mcp']['write_token'] = secrets.token_urlsafe(32)
-        del payload['policy'], payload['refund_policy_events_dir']
         path.write_text(json.dumps(payload), encoding='utf-8')
         cursor.execute('SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s', (database,))
         assert cursor.fetchone() == (0,), 'isolated database name is already in use'
         print('isolated database:', database, flush=True)
         try:
-            for command in ('init', 'seed') if seed else ('init',):
-                result = subprocess.run(application_command('manage', path, command), capture_output=True, timeout=30)
-                assert result.returncode == 0, f'manage {command} failed (exit {result.returncode})'
-            db.select_db(database)
+            if initialize:
+                for command in ('init', 'seed') if seed else ('init',):
+                    result = subprocess.run(application_command('manage', path, command), capture_output=True, timeout=30)
+                    assert result.returncode == 0, f'manage {command} failed (exit {result.returncode})'
+                db.select_db(database)
             yield path, cursor
         finally:
-            cursor.execute(f'DROP DATABASE IF EXISTS `{database}`')
-            cursor.execute('SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s', (database,))
-            assert cursor.fetchone() == (0,)
+            with pymysql.connect(autocommit=True, **connection_config(settings.mysql)) as cleanup, cleanup.cursor() as drop:
+                drop.execute(f'DROP DATABASE IF EXISTS `{database}`')
+                drop.execute('SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s', (database,))
+                assert drop.fetchone() == (0,)
             print('isolated database removed:', database, flush=True)
 
 

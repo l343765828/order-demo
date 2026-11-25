@@ -55,6 +55,12 @@ class RefundTables:
     DISPATCH_REFUND_FOREIGN_KEY: Final = "fk_dispatch_refund"  # 确保提交只引用同订单的退款。
 
 
+# 声明数据库迁移和退款会话恢复识别的历史人民币字段。
+class LegacyCurrency:
+    FIELD: Final = "currency"  # 旧数据库列及旧快照金额字段的名称。
+    CNY: Final = "CNY"  # 历史演示金额按人民币分保存时使用的值。
+
+
 # 声明退款会话持久化使用的固定标识。
 class ConversationStorage:
     LOCK_PREFIX: Final[str] = "order_demo:conversation:"  # 拼接会话 UUID，保持原 MySQL 命名锁。
@@ -83,10 +89,12 @@ class PolicyLimits:
     VECTOR_NORM_TOLERANCE: Final[float] = 0.0001  # 单位向量模长的允许误差。
     MAX_RECALLED_ENTRIES: Final[int] = 8  # 单次检索最多召回的条目数。
     MAX_RANKED_ENTRIES: Final[int] = 3  # 单次检索最多返回的重排条目数。
+    EXCERPT_BOUNDARIES: Final[str] = "。！？；\n"  # 中文条款原文可用的句段分隔符。
+    EXPLICIT_SCOPE_WORD: Final[str] = "仅限"  # 提示原文具有明确适用范围的词。
+    EXPLICIT_EXCEPTION_WORD: Final[str] = "除外"  # 提示原文有独立排除条件的词。
     MILVUS_CONNECT_TIMEOUT_SECONDS: Final[int] = 10  # 连接 Milvus 的超时秒数。
     MILVUS_SEARCH_TIMEOUT_SECONDS: Final[int] = 15  # Milvus 检索的超时秒数。
     MILVUS_WRITE_TIMEOUT_SECONDS: Final[int] = 30  # Milvus 建表及写入的超时秒数。
-    MODEL_TIMEOUT_SECONDS: Final[int] = 30  # 向量编码及重排请求的超时秒数。
 
 
 # 统一长期偏好表使用的字段长度。

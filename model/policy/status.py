@@ -25,3 +25,31 @@ class PolicySearchStatus(StrEnum):
 class PolicyEvidenceStatus(StrEnum):
     SUFFICIENT = "sufficient"  # 本轮有可支持回答的正式条款。
     INSUFFICIENT = "insufficient"  # 本轮正式依据不足，需补查或说明当前政策未说明。
+    CONFLICT = "conflict"  # 本轮适用的正式条款与可信订单资格结论冲突。
+
+
+# 标识资格咨询留存的结构化提取事件。
+class PolicyEvent(StrEnum):
+    ELIGIBILITY_EXTRACTION = "policy_eligibility_extraction"  # 已从本轮候选原文提取资格规则。
+
+
+# 为政策原文中的条件标注可用订单事实和暂无法核实的取值。
+class PolicyOrderFact(StrEnum):
+    OWNED = "owned"  # 订单属于当前消费者。
+    OTHER_OWNER = "other_owner"  # 订单属于其他消费者，不能用本人订单证实。
+    PAID = "paid"  # 已收到这笔订单的支付款项。
+    UNPAID = "unpaid"  # 这笔订单尚未支付。
+    SHIPPED = "shipped"  # 订单商品已发货。
+    UNSHIPPED = "unshipped"  # 订单商品尚未发货。
+    REFUNDED = "refunded"  # 已有这笔订单的成功模拟退款记录。
+    NOT_REFUNDED = "not_refunded"  # 尚无这笔订单的成功模拟退款记录。
+    UNKNOWN = "unknown"  # 条件超出本轮可信事实，例如会员等级或签收日期。
+
+
+# 区分政策原文对当前退款申请描述的结论。
+class PolicyEligibilityOutcome(StrEnum):
+    FULL_ORIGINAL = "full_original"  # 明确允许按原支付渠道退回整笔实付款。
+    DENIED = "denied"  # 明确不办理本次退款，包括已有退款后的重复请求。
+    OTHER_REFUND = "other_refund"  # 明确允许与整单原路不同的退款方式。
+    ALLOWED = "method_unspecified"  # 明确允许办理，但退款金额或渠道不足以核实整单原路。
+    UNSPECIFIED = "no_explicit_decision"  # 原文没有明确说明能否办理退款。

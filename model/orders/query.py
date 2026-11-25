@@ -1,5 +1,5 @@
 """只读订单查询契约；调用者必须先认证消费者身份。"""
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Self
 
 from pydantic import BeforeValidator, Field, model_validator
 
@@ -31,8 +31,6 @@ class OrderDetails(StrictModel):
     refund_status: Annotated[RefundStatus, BeforeValidator(RefundStatus), status_schema(RefundStatus, "Refund Status")]
     # 消费者实际支付的金额，单位为人民币分。
     paid_amount_fen: int = Field(ge=0)
-    # 实付金额的币种，本演示固定为人民币 CNY。
-    currency: Literal["CNY"]
 
 
 # 区分查到订单、订单不可操作和查询失败三种结果。
@@ -55,7 +53,7 @@ class OrderQueryResult(StrictModel):
             order = OrderDetails.model_construct(
                 order_id=details["order_id"], payment_status=PaymentStatus(details["payment_status"]),
                 shipping_status=ShippingStatus(details["shipping_status"]), refund_status=RefundStatus(details["refund_status"]),
-                paid_amount_fen=details["paid_amount_fen"], currency=details["currency"],
+                paid_amount_fen=details["paid_amount_fen"],
             )
         # endregion
 

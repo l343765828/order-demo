@@ -1,10 +1,11 @@
 """显式发布退款政策。"""
 import argparse
+from functools import partial
 from pathlib import Path
 
 from pydantic import TypeAdapter
 
-from config import load_config, use_config
+from config import load_config
 from implementations.policy.backend import open_policy_backend
 from implementations.policy.catalog import MySQLPolicyCatalog, initialize_policy_catalog
 from implementations.policy.publish import publish_policy
@@ -29,8 +30,7 @@ def main() -> None:
     try:
         document = read_policy_document(args.source.read_text(encoding='utf-8-sig'), version=args.version)
         publisher = TypeAdapter[PublisherId](PublisherId).validate_python(args.publisher.strip())
-        use_config(args.config)
-        settings = load_config()
+        settings = load_config(args.config)
         policy = settings.policy
         if policy is None:
             raise ValueError('配置文件缺少 policy 设置')
@@ -44,7 +44,7 @@ def main() -> None:
         engine = create_mysql_engine(settings.mysql, database=policy.catalog_database)
         try:
             result = publish_policy(document, publisher=publisher, qualification=args.qualification,
-                                    catalog=MySQLPolicyCatalog(engine), open_backend=open_policy_backend,
+                                    catalog=MySQLPolicyCatalog(engine), open_backend=partial(open_policy_backend, settings),
                                     confirm_write_ended=args.confirm_write_ended)
         finally:
             engine.dispose()

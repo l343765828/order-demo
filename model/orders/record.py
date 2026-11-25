@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import BeforeValidator, Field
 
@@ -38,8 +38,6 @@ class OrderFacts(StrictModel):
     shipping_status: Annotated[ShippingStatus, BeforeValidator(ShippingStatus)]
     # 实付金额，单位人民币分。
     paid_amount_fen: int = Field(ge=0)
-    # 演示订单的人民币币种。
-    currency: Literal["CNY"]
 
 
 # 表示 orders 中已持久化的一行，包含数据库记录的时间。

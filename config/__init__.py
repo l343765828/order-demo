@@ -2,9 +2,14 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Annotated
+from urllib.parse import urlsplit
+
+from pydantic import AfterValidator, AnyHttpUrl, ConfigDict, PositiveInt, StringConstraints, TypeAdapter
 
 from config.demo import DEMO_DATABASE
 from config.limits import ConnectionLimits, PolicyLimits
+from model.base import StrictModel
 
 DEFAULT_PATH = Path(__file__).with_name("local.json")
 _config_path = DEFAULT_PATH
@@ -40,28 +45,75 @@ class MCPConfig:
     write_token: str | None = None
 
 
+# 校验 HTTP 地址并保留用户填写的完整请求路径。
+def _validate_model_url(value: str) -> str:
+
+    # region 校验模型服务地址并返回原始地址
+    TypeAdapter(AnyHttpUrl).validate_python(value)
+    return value
+    # endregion
+
+
+# 拒绝会使 HTTP 客户端从 Qwen 地址生成认证头的用户信息。
+def _validate_qwen_url(value: str) -> str:
+
+    # region 检查免鉴权地址并返回请求基址
+    if urlsplit(value).username is not None:
+        raise ValueError("Qwen 地址不能包含用户信息")
+    return value
+    # endregion
+
+
+ModelURL = Annotated[str, StringConstraints(pattern=r"(?i)^https?://[^/\\\x00-\x20\x7f\s?#]+[^\\\x00-\x20\x7f\s]*$"),
+                     AfterValidator(_validate_model_url)]
+ModelName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
 # 保存免鉴权 Qwen 服务的地址和模型参数。
-@dataclass(frozen=True)
-class QwenConfig:
+class QwenConfig(StrictModel):
+    model_config = ConfigDict(frozen=True)
+
     # Host 和调查子 Agent 调用 Qwen 的 API 基址。
-    base_url: str
+    base_url: Annotated[ModelURL, AfterValidator(_validate_qwen_url)]
     # 意图识别、计划生成和调查使用的模型标识。
-    model: str = "Qwen/Qwen3-8B"
+    model: ModelName
     # 单次模型请求允许生成的最大 token 数。
-    max_completion_tokens: int = 512
+    max_completion_tokens: PositiveInt
     # 模型 HTTP 调用的超时设置，单位为秒。
-    timeout: int = 90
+    timeout: PositiveInt
 
 
-# 保存政策检索使用的 Milvus 与模型服务连接配置。
+# 保存政策向量编码所用的模型服务配置。
+class EmbeddingConfig(StrictModel):
+    model_config = ConfigDict(frozen=True)
+
+    # 向量编码请求的完整 HTTP API 地址。
+    url: ModelURL
+    # 政策条目和查询文本使用的向量模型标识。
+    model: ModelName
+    # 向量编码请求超时，单位为秒。
+    timeout: PositiveInt
+
+
+# 保存政策候选重排所用的模型服务配置。
+class RerankerConfig(StrictModel):
+    model_config = ConfigDict(frozen=True)
+
+    # 候选重排请求的完整 HTTP API 地址。
+    url: ModelURL
+    # 对召回候选排序使用的重排模型标识。
+    model: ModelName
+    # 候选重排请求超时，单位为秒。
+    timeout: PositiveInt
+
+
+# 保存政策检索使用的 Milvus 与发布目录连接配置。
 @dataclass(frozen=True)
 class PolicyConfig:
     # 保存并检索退款政策向量的 Milvus 服务地址。
     milvus_uri: str
     # 连接 Milvus 政策集合所需的访问凭据。
     milvus_token: str
-    # 政策原文和查询使用的向量服务及候选重排服务的共同基址。
-    model_base: str
     # 政策目录所在的 MySQL 数据库，隔离验收时与独立集合配套配置。
     catalog_database: str = PolicyLimits.CATALOG_DATABASE
     # 政策索引集合，与上述目录配套管理。
@@ -81,6 +133,10 @@ class AppConfig:
     policy: PolicyConfig | None = None
     # Host 保存最终政策事件的目录。为空时暂停新写入，原结果仍可查询。
     refund_policy_events_dir: str | None = None
+    # 政策编码使用的模型，启用政策时必填。
+    embedding: EmbeddingConfig | None = None
+    # 政策候选重排使用的模型，启用政策时必填。
+    reranker: RerankerConfig | None = None
 
 
 # 校验 MCP 凭据为足够长且可安全放入 HTTP 请求头的字符串。
@@ -103,17 +159,19 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         # region 读取 JSON 并构造配置对象
         data = json.loads(source.read_text(encoding="utf-8"))
         qwen = {**data["qwen"]}
-        # 旧 JSON 可以继续读取，历史密钥不进入模型客户端。
+        # 忽略历史密钥，Qwen 客户端沿用免鉴权协议。
         qwen.pop("api_key", None)
         config = AppConfig(mysql=MySQLConfig(**data["mysql"]), mcp=MCPConfig(**data["mcp"]),
-                           qwen=QwenConfig(**qwen),
+                           qwen=QwenConfig.model_validate(qwen),
                            policy=PolicyConfig(**data["policy"]) if "policy" in data else None,
+                           embedding=EmbeddingConfig.model_validate(data["embedding"]) if "embedding" in data else None,
+                           reranker=RerankerConfig.model_validate(data["reranker"]) if "reranker" in data else None,
                            refund_policy_events_dir=data.get("refund_policy_events_dir"))
         # endregion
 
-        # region 校验连接字段、端口、模型限制和可选政策配置
+        # region 校验 MySQL 和 MCP 连接字段及端口
         if (
-            # 必填连接、凭据或模型字段中有值不是非空字符串。
+            # 必填连接或凭据字段中有值不是非空字符串。
             not all(
                 (
                     # 连接配置字段使用字符串。
@@ -123,7 +181,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
                 )
                 for value in (
                     config.mysql.host, config.mysql.user, config.mysql.password, config.mcp.url,
-                    config.mysql.database, config.mcp.read_token, config.mcp.host, config.qwen.base_url, config.qwen.model,
+                    config.mysql.database, config.mcp.read_token, config.mcp.host,
                 )
             )
             # MySQL 端口未配置为整数。
@@ -134,29 +192,26 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             or type(config.mcp.port) is not int
             # MCP 服务端口不在有效范围内。
             or not 1 <= config.mcp.port <= 65535
-            # 模型的最大输出 token 数未配置为整数。
-            or type(config.qwen.max_completion_tokens) is not int
-            # 模型的最大输出 token 数小于 1。
-            or config.qwen.max_completion_tokens < 1
-            # 模型请求超时未配置为整数。
-            or type(config.qwen.timeout) is not int
-            # 模型请求超时小于 1 秒。
-            or config.qwen.timeout < 1
         ):
             raise ValueError
+        # endregion
+
+        # region 启用政策时校验连接字段和模型配置的完整性
         if (
             # 已提供可选的政策检索配置。
             config.policy is not None
-            # 政策向量库地址、凭据或模型服务地址中有值不是有效文本。
-            and not all(
-                (
-                    # 政策检索连接字段使用字符串。
-                    isinstance(value, str)
-                    # 字段去掉首尾空白后仍有内容。
-                    and value.strip()
+            # 向量库配置不完整，或未提供政策所需的两个模型。
+            and (
+                # 向量库地址、凭据、目录或集合没有填写为有效文本。
+                not all(
+                    isinstance(value, str) and value.strip()
+                    for value in (config.policy.milvus_uri, config.policy.milvus_token,
+                                  config.policy.catalog_database, config.policy.milvus_collection)
                 )
-                for value in (config.policy.milvus_uri, config.policy.milvus_token, config.policy.model_base,
-                              config.policy.catalog_database, config.policy.milvus_collection)
+                # 未提供用于政策编码的模型。
+                or config.embedding is None
+                # 未提供用于候选重排的模型。
+                or config.reranker is None
             )
         ):
             raise ValueError

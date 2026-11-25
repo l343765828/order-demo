@@ -102,7 +102,8 @@ def host(config):
                 process.stdin.write(question + '\n')
                 process.stdin.flush()
                 lines = []
-                while line := output.get(timeout=120):
+                # 一轮调查包含多次真实模型请求，等待覆盖整轮回复。
+                while line := output.get(timeout=300):
                     lines.append(line.removeprefix('你：'))
                     if expected in line:
                         return '\n'.join(lines)
@@ -134,11 +135,13 @@ async def check_receipts(settings, catalog, index, update, turn, evidence, probe
             (DOC, '1.0'), (DemoPolicy.DOCUMENT_ID, '1.0')}, both.model_dump(mode='json')
         first_reply = await asyncio.to_thread(turn, QUESTION, '《模拟退款回执补充政策》1.0 版 FAQ-001')
         assert FAQ_ANSWER_V1 in first_reply
-        eligibility = await asyncio.to_thread(turn, 'DEMO-1001 能退吗？', '《演示退款政策与常见问题》1.0 版 RF-003')
+        eligibility = await asyncio.to_thread(turn, 'DEMO-1001 能退吗？', '1.0 版 RF-003')
         assert '已支付、未发货且尚未退款' in eligibility
+        clause = next(item for item in both.candidates if item.clause_id == 'RF-003')
+        assert clause.text.split('\n', 1)[1].split('。', 1)[0] in eligibility
         pending = asyncio.create_task(asyncio.to_thread(turn, OLD_SUPPLEMENT, '《模拟退款回执补充政策》1.0 版 RF-015'))
         try:
-            deadline = time.monotonic() + 120
+            deadline = time.monotonic() + 300
             while not (probe / 'before-supplement').exists():
                 if pending.done():
                     await pending
@@ -169,7 +172,7 @@ async def check_receipts(settings, catalog, index, update, turn, evidence, probe
                          'receipts': [r.model_dump(mode='json') for r in (before, both, old, new, unknown)]})
 
 
-def check_faults(catalog, index, evidence, engine, cursor):
+def check_faults(catalog, index, config, evidence, engine, cursor):
     partial = read_policy_document(source('3.0', old_clause=True), version='3.0')
     corrected = read_policy_document(source('3.0'), version='3.0')
     live_reads = []
@@ -283,7 +286,7 @@ def check_faults(catalog, index, evidence, engine, cursor):
             return rows
 
     def race(version):
-        racing = RacingBackend()
+        racing = RacingBackend(config)
         try:
             doc = read_policy_document(source(version), version=version)
             return release(catalog, racing, doc).model_dump(mode='json')
@@ -394,12 +397,12 @@ def main():
             settings['policy'].update(catalog_database=namespace, milvus_collection=namespace)
             root_config = Path(folder) / 'publisher.json'
             root_config.write_text(json.dumps(settings), encoding='utf-8')
-            use_config(root_config)
             with ExitStack() as resources:
-                engine = create_mysql_engine(load_config(root_config).mysql, database=namespace)
+                config = load_config(root_config)
+                engine = create_mysql_engine(config.mysql, database=namespace)
                 resources.callback(engine.dispose)
                 catalog = MySQLPolicyCatalog(engine)
-                index = PolicyBackend()
+                index = PolicyBackend(config)
                 resources.callback(index.close)
 
                 def remove_collection():
@@ -461,7 +464,7 @@ def main():
                     evidence.append({'case': 'host_tool_contract', 'pid': host_pid, 'mcp_events': receipts,
                                      'verified_citations': citations})
                 print('same Host instance, MCP receipts and pinned supplement verified', flush=True)
-                check_faults(catalog, index, evidence, engine, cursor)
+                check_faults(catalog, index, config, evidence, engine, cursor)
                 blocked = read_policy_document(source('7.0'), version='7.0')
                 supplemental.write_text(source('7.0'), encoding='utf-8')
                 failure = cli_publish(root_config, supplemental, '7.0', qualification='changed', expected=1)

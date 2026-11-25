@@ -5,7 +5,7 @@ from pymysql import MySQLError
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import load_config
-from implementations.refund.demo_data import MySQLSeedService, initialize_demo_database
+from implementations.refund.demo_data import LegacyCurrencyError, MySQLSeedService, initialize_demo_database
 from model.refund.status import DemoDataCommand
 from utils.database import create_mysql_engine
 
@@ -37,6 +37,12 @@ def main() -> None:
                 finally:
                     engine.dispose()
             # endregion
+
+    except LegacyCurrencyError as exc:
+
+        # region 迁移发现异常币种时报告表名并退出
+        parser.exit(1, f"{exc}\n")
+        # endregion
 
     except (MySQLError, SQLAlchemyError):
 
