@@ -72,7 +72,7 @@ def test_mcp_entry_disposes_process_engine_on_exit(tmp_path, monkeypatch, raises
         'mysql': {'host': '127.0.0.1', 'port': 3306, 'user': 'test', 'password': 'sample', 'database': 'order_test'},
         'mcp': {'url': 'http://127.0.0.1:8765/mcp', 'port': 8765, 'read_token': 'r' * 32},
         'qwen': {'base_url': 'http://127.0.0.1:8766/v1', 'model': 'qwen-test',
-                 'max_completion_tokens': 32, 'timeout': 10, 'api_key': 'sample'},
+                 'max_completion_tokens': 32, 'timeout': 10},
     }
     if catalog_database is not None:
         settings['policy'] = {'catalog_database': catalog_database, 'milvus_uri': 'http://example.invalid',

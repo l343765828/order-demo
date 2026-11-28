@@ -103,10 +103,10 @@ def lock_head(connection: Connection) -> PolicyCatalogHead:
 # 为符合条件的版本登记首次生效修订，返回是否更新了一条记录。
 def activate_release(connection: Connection, *, target: PolicyVersion, revision: int) -> bool:
 
-    # region 只更新从未生效、写入无待确认且资格确认允许切换的版本
+    # region 只更新从未生效、写入已完成且资格确认允许切换的版本
     result = connection.execute(
         load_sql(_CatalogSQL.ACTIVATE_RELEASE.value, releases=PolicyCatalogTables.RELEASES),
-        {**target.model_dump(), "revision": revision, "pending_state": PolicyWriteState.PENDING.value,
+        {**target.model_dump(), "revision": revision, "finished_state": PolicyWriteState.FINISHED.value,
          "qualification": QualificationConfirmation.UNCHANGED.value},
     )
     return result.rowcount == 1

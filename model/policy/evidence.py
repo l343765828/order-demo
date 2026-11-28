@@ -35,6 +35,8 @@ class EligibilityRule(StrictModel):
     exceptions: list[EligibilityException]
     # 原文给出的结论，退款方式不明确时不得视作整单原路。
     outcome: Annotated[PolicyEligibilityOutcome, BeforeValidator(PolicyEligibilityOutcome)]
+    # 原文是否直接回答主动索要的政策问题。未指定主题或不能确认时为 False。
+    answers_policy_question: bool = False
 
 
 # 模型从本轮候选原文提取的规则集合，无法提取时为空。
@@ -53,8 +55,8 @@ class PolicyCitation(StrictModel):
     version: str = Field(min_length=1)
     # 被引用的条目编号，可以是正式条款或常见问题。
     clause_id: str = Field(min_length=1)
-    # 被引用条目的类型。旧 checkpoint 可缺少该字段，不能用于新一轮核验。
-    entry_type: Annotated[PolicyEntryType, BeforeValidator(PolicyEntryType)] | None = None
+    # 被引用条目的类型，用于区分正式条款与常见问题。
+    entry_type: Annotated[PolicyEntryType, BeforeValidator(PolicyEntryType)]
     # 被引用的政策原文，核验时必须能在实际检索到的条款中找到。
     excerpt: str = Field(min_length=1)
 
@@ -67,8 +69,8 @@ class PolicyEvidence(StrictModel):
     query: str = Field(min_length=1)
     # 本轮是否已找到支持答复的政策依据，声明充分时必须提供引用。
     status: Annotated[PolicyEvidenceStatus, BeforeValidator(PolicyEvidenceStatus), status_schema(PolicyEvidenceStatus)]
-    # 本轮选定的目录修订号。旧 checkpoint 可缺少该字段。
-    catalog_revision: PolicyCatalogRevision | None = None
+    # 本轮选定的目录修订号，尚未成功读取目录时为 None。
+    catalog_revision: PolicyCatalogRevision | None
     # 拟用于本轮答复的政策引用，逐条关联文档版本和本轮检索事件。
     citations: list[PolicyCitation]
 

@@ -44,7 +44,7 @@ def run_cli(
         log_event(event, session_id=session_id, trace_id=trace_id, **fields)
         # endregion
 
-    # 将已验证的查单步骤交给订单调查执行器。
+    # 将已验证的查单步骤交给订单调查执行器。-> EXECUTE用
     def investigate(step: InvestigationStep, trace_id: str) -> OrderToolEvent | None:
 
         # region 将已验证的查单步骤交给订单调查执行器

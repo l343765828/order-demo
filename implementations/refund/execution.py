@@ -1,25 +1,20 @@
 """复核本次退款授权与事实，按确认顺序保存和单次执行。"""
 
 from collections.abc import Callable
-from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import AppConfig
-from implementations.policy.evidence import verify_policy_evidence
 from implementations.refund import controlled_tools
-from implementations.refund.qualification import reject_refund_for_order_state
+from implementations.refund.qualification import qualify_refund
 from interfaces.refund.storage import RefundDispatchService
 from model.orders.query import OrderQueryResult
-from model.orders.status import OrderQueryStatus, RefundStatus
-from model.policy.evidence import PolicyEvidence
-from model.policy.search import PolicySearchResult
-from model.refund.status import RefundEvent, RefundOutcome, RefundReason
+from model.orders.status import OrderQueryStatus
+from model.refund.status import RefundEvent, RefundOutcome, RefundQualification, RefundReason
 from model.refund.submission import (
-    AuthorizedRefundIntent, GetRefundResultRequest, RefundPolicyVerification, RefundResult, SubmitMockRefundRequest,
+    AuthorizedRefundIntent, GetRefundResultRequest, PreparedRefund, RefundResult, SubmitMockRefundRequest,
 )
-from utils.events import persist_event
 
 
 # 固定节点共享的业务能力，绑定数据库、独立 MCP 配置和当前会话事件。
@@ -85,8 +80,10 @@ class RefundExecution:
         if order_result.status is OrderQueryStatus.UNAVAILABLE:
             return RefundResult(status=RefundOutcome.DENIED, reason=RefundReason.UNAVAILABLE_ORDER)
         if (
+            # 查单服务没有确认取得本人订单。
+            order_result.status is not OrderQueryStatus.FOUND
             # 订单服务未返回本人订单事实。
-            order is None
+            or order is None
             # 返回的订单与本次明确授权不符。
             or order.order_id != authorization.order_id
         ):
@@ -94,15 +91,17 @@ class RefundExecution:
         # endregion
 
         # region 优先直接核对原退款或未决提交，无需再次检索政策
+        qualification = qualify_refund(payment_status=order.payment_status, shipping_status=order.shipping_status,
+                                      refund_status=order.refund_status)
         try:
             key = self.dispatches.blocking_dispatch(authorization)
         except (SQLAlchemyError, ValueError):
-            if order.refund_status is RefundStatus.REFUNDED:
+            if qualification is RefundQualification.ALREADY_REFUNDED:
                 return self._lookup(order.order_id, trace_id)
             return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.EXECUTION_UNAVAILABLE)
         if (
             # 该订单已有退款记录。
-            order.refund_status is RefundStatus.REFUNDED
+            qualification is RefundQualification.ALREADY_REFUNDED
             # 已有未决提交可能产生退款。
             or key is not None
         ):
@@ -110,7 +109,7 @@ class RefundExecution:
         # endregion
 
         # region 用真实订单支付和发货状态确定资格
-        rejection = reject_refund_for_order_state(order.payment_status, order.shipping_status)
+        rejection = qualification.denial_reason
         if rejection is not None:
             return RefundResult(status=RefundOutcome.DENIED, reason=rejection)
         return None
@@ -130,12 +129,11 @@ class RefundExecution:
 
         # endregion
 
-    # 复核最新订单，核对本轮政策出处并持久保存最终核验事件。
-    def review(self, authorization: AuthorizedRefundIntent, evidence: PolicyEvidence,
-               receipts: list[PolicySearchResult], trace_id: str,
-               current: OrderQueryResult | None) -> RefundPolicyVerification | RefundResult:
+    # 复核最新订单，通过时为本轮授权生成唯一提交键。
+    def review(self, authorization: AuthorizedRefundIntent, trace_id: str,
+               current: OrderQueryResult | None) -> PreparedRefund | RefundResult:
 
-        # region 确认最新订单仍具备相同的四项资格事实，优先核对原退款及未决提交
+        # region 按最新订单事实复核资格并优先处理原退款及未决提交
         if current is None:
 
             # region 最新订单查询未返回回执时停止办理
@@ -151,46 +149,27 @@ class RefundExecution:
 
         # endregion
 
-        # region 订单仍满足资格时核对已选条款确实来自本轮版本快照
-        if not verify_policy_evidence(evidence, receipts):
+        # region 执行通道可用时生成单次提交信息
+        if self.settings.mcp.write_token is None:
 
-            # region 无法确认本轮正式出处时拒绝发起新提交
-            return RefundResult(status=RefundOutcome.DENIED, reason=RefundReason.POLICY_UNAVAILABLE)
+            # region 缺少执行凭据时结束本次新办理
+            return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.EXECUTION_UNAVAILABLE)
             # endregion
 
-        # endregion
-
-        # region 执行通道可用时持久保存最终核验事件，失败则不创建提交
-        directory = self.settings.refund_policy_events_dir
-        if self.settings.mcp.write_token is None:
-            return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.EXECUTION_UNAVAILABLE)
-        event = RefundPolicyVerification(trace_id=trace_id, idempotency_key=str(uuid4()),
-                                         authorization=authorization, evidence=evidence)
-        try:
-            if directory is None:
-                raise OSError("政策事件目录未配置")
-            persist_event(Path(directory), event.idempotency_key, RefundEvent.POLICY_VERIFIED.value,
-                          **event.model_dump(mode="json"))
-        except OSError as exc:
-            self.emit(RefundEvent.STORE_FAILED.value, idempotency_key=event.idempotency_key,
-                      stage=RefundEvent.POLICY_VERIFIED.value, error_type=type(exc).__name__)
-            return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.POLICY_NOT_SAVED)
-        self.emit(RefundEvent.POLICY_VERIFIED.value, idempotency_key=event.idempotency_key,
-                  evidence=evidence.model_dump(mode="json"))
-        return event
+        return PreparedRefund(trace_id=trace_id, idempotency_key=str(uuid4()), authorization=authorization)
         # endregion
 
     # 保存当轮提交并最多发送一次，未确认结果仅使用只读核对。
-    def send(self, event: RefundPolicyVerification) -> RefundResult:
+    def send(self, prepared: PreparedRefund) -> RefundResult:
 
         # region 确认本次提交已保存，遇竞争或旧提交时只读核对
-        key = event.idempotency_key
-        authorization = event.authorization
+        key = prepared.idempotency_key
+        authorization = prepared.authorization
         try:
-            if not self.dispatches.reserve_dispatch(event):
+            if not self.dispatches.reserve_dispatch(prepared):
                 blocker = self.dispatches.blocking_dispatch(authorization)
                 if blocker is not None:
-                    return self._lookup(authorization.order_id, event.trace_id, blocker)
+                    return self._lookup(authorization.order_id, prepared.trace_id, blocker)
                 return RefundResult(status=RefundOutcome.FAILED, reason=RefundReason.DISPATCH_NOT_SAVED)
         except (SQLAlchemyError, ValueError) as exc:
             self.emit(RefundEvent.STORE_FAILED.value, idempotency_key=key, stage=RefundEvent.DISPATCH_SAVED.value,
@@ -211,7 +190,7 @@ class RefundExecution:
             # endregion
 
         try:
-            result = controlled_tools.send_refund(self.settings.mcp, request, event.trace_id, before_send=report_send)
+            result = controlled_tools.send_refund(self.settings.mcp, request, prepared.trace_id, before_send=report_send)
             if (
                 # 回执报告成功且携带退款记录。
                 result.refund is not None
@@ -232,7 +211,7 @@ class RefundExecution:
             # endregion
 
         if result.status is RefundOutcome.UNCONFIRMED:
-            return self._lookup(request.order_id, event.trace_id, key, attempted=True)
+            return self._lookup(request.order_id, prepared.trace_id, key, attempted=True)
         self._record(key, result)
         return result
         # endregion

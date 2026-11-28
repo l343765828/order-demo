@@ -35,15 +35,10 @@ def verify_policy_evidence(
     for citation in evidence.citations:
         entry_type = citation.entry_type
         if (
-            # 旧会话中的引用未记录条目类型，无法进行完整的出处核对。
-            entry_type is None
-            # 当前用途需要正式条款，却引用了其他类型。
-            or (
-                # 当前正在核验订单资格或退款办理的政策依据。
-                formal_only
-                # 本条引用属于 FAQ。
-                and entry_type is not PolicyEntryType.POLICY
-            )
+            # 当前正在核验订单资格或退款办理的政策依据。
+            formal_only
+            # 本条引用属于 FAQ。
+            and entry_type is not PolicyEntryType.POLICY
         ):
             return False
         key = (citation.event_id, citation.document_id, citation.version, citation.clause_id, entry_type)

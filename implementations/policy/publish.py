@@ -3,7 +3,6 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 
-from config.demo import DemoPolicy
 from implementations.policy.backend import PolicyBackend
 from implementations.policy.catalog import MySQLPolicyCatalog, PublicationConflict
 from model.policy.catalog import (
@@ -101,35 +100,30 @@ def publish_policy(document: PolicyDocument, *, publisher: str, qualification: Q
             raise ValueError('该原件已声明改变资格，须等待同版本结构化规则')
         # endregion
 
-        # region 核对索引结构，仅允许复用完整匹配的工单 15 演示基线
+        # region 拒绝未登记的向量并发布当前版本的完整索引
         with open_backend() as backend:
             backend.create_collection()
-            existing_entries = write_state is PolicyWriteState.NOT_STARTED and backend.has_entries(document.target)
-            adopt_baseline = (
-                # 当前目标是订单资格所依据的演示文档。
-                document.target.document_id == DemoPolicy.DOCUMENT_ID
-                # 本次登记的是迁移前已向工单 15 提供检索的版本。
-                and document.target.version == DemoPolicy.BASELINE_VERSION
-                # 该版本存在由原发布入口写入的历史索引。
-                and existing_entries
-            )
-            if not adopt_baseline:
+            if (
+                # 目录没有已确认的本版本向量写入。
+                write_state is PolicyWriteState.NOT_STARTED
+                # 集合中已有无法归属到受控发布的本版本条目。
+                and backend.has_entries(document.target)
+            ):
 
-                # region 仅对未生效版本标记操作在途，清理并全量重发
-                if existing_entries:
-                    raise ValueError('存在缺少发布记录的政策条目，须核对来源后再发布')
-                attempt.record_attempt(approval, write_state=PolicyWriteState.PENDING)
-                backend.clear_version(document.target)
-                backend.publish(document.entries)
-                attempt.finish_write()
+                # region 未登记条目存在时终止本次发布
+                raise ValueError('存在缺少发布记录的政策条目，须核对来源后再发布')
                 # endregion
 
+            attempt.record_attempt(approval, write_state=PolicyWriteState.PENDING)
+            backend.clear_version(document.target)
+            backend.publish(document.entries)
+            attempt.finish_write()
             _verify_index(document, backend)
         # endregion
 
         # region 向量通过验证后提交切换，异常回执由下一次命令先查询历史
         try:
-            revision = attempt.activate(active_version, adoption=approval if adopt_baseline else None)
+            revision = attempt.activate(active_version)
         except PublicationConflict:
             raise
         except Exception:

@@ -34,7 +34,6 @@ from utils.mcp_client import bind_mcp_tool, open_mcp_client
 from utils.mysql import connection_config, mysql_connection
 from launch_with_config import application_command
 from order_mysql_fixture import isolated_order_database
-from policy_condition_checks import assert_complete_policy_extraction
 from verify_order_cli import read_events
 import verify_policy_faults as faults
 
@@ -186,6 +185,7 @@ READ_ONLY_REFUND_RESULT = {"status": "failed", "refund": None, "reason": "execut
 
 def verify_eligibility_switch(settings, folder, turn, capture, publish, evidence, *, order_id=None):
     prompt = "DEMO-1001 能退吗？"
+    denied_prompt = "DEMO-1002 能退吗？"
     source = SOURCE_PATH.read_text(encoding="utf-8")
     clauses = {item.clause_id: item.text.split("\n", 1)[1] for item in parse_policy(source)}
     first_eligible_sentence = clauses["RF-003"].split("。", 1)[0] + "。"
@@ -202,7 +202,7 @@ def verify_eligibility_switch(settings, folder, turn, capture, publish, evidence
             evidence.append({"case": "publish_v2", "release": publish(v2, "2.0", 2)})
         else:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                pending = executor.submit(turn, path, prompt, (first_eligible_sentence, "1.0 版 RF-003"), "order_question",
+                pending = executor.submit(turn, path, denied_prompt, (clauses["RF-004"].split("。", 1)[0], "1.0 版 RF-004"), "order_question",
                                           tools=[*ELIGIBILITY_TOOLS, "search_policy"])
                 try:
                     deadline = time.monotonic() + 180
@@ -225,8 +225,8 @@ def verify_eligibility_switch(settings, folder, turn, capture, publish, evidence
             evidence.append({"case": "publish_v2_during_eligibility_followup", "release": release})
 
         cases = [
-            (prompt, (V2_ELIGIBLE, "2.0 版 RF-083")),
-            ("DEMO-1002 能退吗？", (clauses["RF-004"].split("。", 1)[0], "2.0 版 RF-004")),
+            (prompt, ("符合整单原路退款条件",)),
+            (denied_prompt, (clauses["RF-004"].split("。", 1)[0], "2.0 版 RF-004")),
             ("DEMO-1003 能退吗？", (clauses["RF-009"].split("。")[1], "2.0 版 RF-009")),
             ("DEMO-1004 能退吗？", ("已发货", "不办理", "2.0 版", "依据：《")),
         ]
@@ -235,7 +235,8 @@ def verify_eligibility_switch(settings, folder, turn, capture, publish, evidence
         first_case = len(evidence)
         failed = []
         with ThreadPoolExecutor(max_workers=3) as executor:
-            requests = [executor.submit(turn, path, question, expected, "order_question", tools=ELIGIBILITY_TOOLS)
+            requests = [executor.submit(turn, path, question, expected, "order_question",
+                                        tools=["get_order"] if question == prompt else ELIGIBILITY_TOOLS)
                         for question, expected in cases]
             for request in requests:
                 try:
@@ -250,11 +251,8 @@ def verify_eligibility_switch(settings, folder, turn, capture, publish, evidence
         eligible = next((case for case in new_cases if case["question"] == prompt), None)
         if eligible is None:
             return
-        [verified] = [e["evidence"] for e in eligible["events"] if e["event"] == "policy_evidence"
-                      and e["evidence"]["status"] == PolicyEvidenceStatus.SUFFICIENT]
-        [citation] = verified["citations"]
-        assert citation["excerpt"] == V2_ELIGIBLE
-        assert_complete_policy_extraction(eligible["events"], citation)
+        assert all(e["event"] != "mcp_search_policy" for e in eligible["server_events"])
+        assert all(e["event"] != "policy_evidence" for e in eligible["events"])
 
 
 def main():
@@ -388,7 +386,7 @@ def main():
                 verified = [e["evidence"] for e in case["events"] if e["event"] == "policy_evidence"]
                 read_only_refund = case["question"] == READ_ONLY_REFUND_PROMPT
                 if read_only_refund:
-                    assert verified and verified[-1]["status"] == "sufficient"
+                    assert not verified and not policy_calls
                     refund_results = [e["result"] for e in case["events"] if e["event"] == RefundEvent.RESULT]
                     assert refund_results == [READ_ONLY_REFUND_RESULT]
                     assert case["reply"] == READ_ONLY_REFUND_REPLY
@@ -432,18 +430,18 @@ def main():
 
             else:
                 with server(settings, folder) as (path, log):
-                    read_only_case = (READ_ONLY_REFUND_PROMPT, (READ_ONLY_REFUND_REPLY,), "refund_request", ELIGIBILITY_TOOLS)
+                    read_only_case = (READ_ONLY_REFUND_PROMPT, (READ_ONLY_REFUND_REPLY,), "refund_request", ["get_order"])
                     cases = [
                         ("退款多久能到账？", ("本演示没有真实资金到账过程", "《演示退款政策与常见问题》",
                                           "FAQ-004"), "policy_question", ["search_policy"]),
                         ("钱什么时候回到我的账户？", ("本演示没有真实资金到账过程", "FAQ-004"),
                          "policy_question", ["search_policy"]),
                         ("会员积分如何兑换航空里程？", (NO_EVIDENCE,), "policy_question", ["search_policy"]),
-                        ("DEMO-1001 能退吗？", ("符合整单原路退款条件", "RF-003"), "order_question", ["get_order", "search_policy"]),
+                        ("DEMO-1001 能退吗？", ("符合整单原路退款条件",), "order_question", ["get_order"]),
                         ("DEMO-1002 能退吗？", ("未支付", "RF-004"), "order_question", ["get_order", "search_policy"]),
                         ("DEMO-1004 能退吗？", ("已发货", "RF-004"), "order_question", ["get_order", "search_policy"]),
                         ("DEMO-2001 能退吗？", ("未找到可操作的订单",), "order_question", ["get_order"]),
-                        ("能退 DEMO-1001 吗", ("符合整单原路退款条件", "RF-003"), "order_question", ["get_order", "search_policy"]),
+                        ("能退 DEMO-1001 吗", ("符合整单原路退款条件",), "order_question", ["get_order"]),
                         read_only_case,
                         ("这单退款？", ("想咨询", "还是要办理"), "unclear", []),
                     ]
@@ -464,8 +462,8 @@ def main():
                                 failed.append(exc)
                     if not (args.smoke or args.faults_only or args.ticket15_extra or args.read_only_refund):
                         sid = turn(path, "能退吗", ("请提供", "订单编号"), "order_question", tools=[])
-                        turn(path, "DEMO-1001", ("符合整单原路退款条件", "RF-003"),
-                             "order_question", session=sid, tools=["get_order", "search_policy"])
+                        turn(path, "DEMO-1001", ("符合整单原路退款条件",),
+                             "order_question", session=sid, tools=["get_order"])
                     capture(log)
                     if failed:
                         raise failed[0]
@@ -548,7 +546,7 @@ def main():
                     item = saver.get_tuple({"configurable": {"thread_id": sid}})
                     assert item is not None
                     channels = item.checkpoint["channel_values"]
-                    assert channels.get("refund_verification") is None and channels.get("pending_refund") is None
+                    assert channels.get("prepared_refund") is None
                     if sid in refund_sessions:
                         assert channels["refund_authorization"]["order_id"] == "DEMO-1001"
                         assert channels["refund_authorization"]["session_id"] == sid

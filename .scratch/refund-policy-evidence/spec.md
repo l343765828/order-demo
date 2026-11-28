@@ -2,6 +2,19 @@
 
 Status: ready-for-agent
 
+## 后续开发范围（2026-11-28）
+
+本规格及各工单的验收记录保留供追溯。后续开发按 [ADR-0012](../../docs/adr/0012-refund-policy-for-explanation.md) 和[退款资格判断与按需政策解释改造](../refund-conditional-policy/spec.md) 执行。
+
+| 原工单 | 验收结论与后续处理 |
+| --- | --- |
+| [01 在订单资格咨询中引用生效政策](issues/01-cite-active-policy-for-eligibility.md) | 原流程五项均已验收。停止扩展普通合格咨询的默认政策检索。新流程直接依据可信订单事实答复，政策版本快照及引用核验继续用于拒绝解释和明确的政策请求。 |
+| [02 在退款办理中核对并引用政策依据](issues/02-verify-policy-in-refund-handling.md) | 原流程五项均已验收。新流程生效时取消提交前的政策检索、证据核验和核验事件持久化门槛，避免政策故障阻断合格办理。拒绝后的适用条款解释由[新工单 02](../refund-conditional-policy/issues/02-explain-qualification-denial.md)承接。 |
+| [03 移除币种字段并兼容历史数据](issues/03-remove-redundant-currency.md) | 新版人民币分契约已验收。旧库删列迁移、非人民币历史数据拦截和旧检查点恢复三项继续保留原验收状态，退出本次开发范围。切换要求目标开发库符合新版表结构，重置演示数据并从新会话开始。发现旧表结构时暂停切换，另行确认处理方式。 |
+| [04 核验退款政策依据的条件完整性](issues/04-verify-complete-policy-conditions.md) | 原流程三项均已验收。已验证的条件和例外核验继续复用于政策解释，原先依赖政策核验才允许提交的场景随提交门槛一并退出。 |
+
+后续先实施[新工单 01](../refund-conditional-policy/issues/01-unify-qualification-and-eligible-refund.md)。RF-013 新版发布、目标开发库重置及旧政策核验 JSONL 清理归[新工单 04](../refund-conditional-policy/issues/04-coordinate-policy-release-and-verify-cutover.md)。
+
 ## 问题
 
 指定订单的资格解释依赖代码里预设的条款号和解释文案。批准的政策即使只调整条款编号或措辞，检索结果也可能无法用于回复，或者回复仍沿用旧文案。政策审批、代码开发和文档上传由不同人员负责，运营上传时只掌握已批准的政策原文。因订单资格被拒绝的办理请求也需要让消费者看到相关政策依据。

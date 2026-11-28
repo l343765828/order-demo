@@ -221,7 +221,8 @@ def make_app(
         except Exception:
 
             # region 后端发生异常时生成失败结果和空候选
-            result = PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=str(uuid4()), candidates=[])
+            result = PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=str(uuid4()),
+                                        candidates=[], catalog_revision=None)
             # endregion
 
         # endregion

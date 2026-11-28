@@ -24,16 +24,16 @@ from config.demo import CONSUMER_ID
 from utils.mysql import connection_config
 
 
-def run(module, config, *args, code=0, root=ROOT):
-    launcher = root / "test" / "launch_with_config.py"
+def run(module, config, *args, code=0):
+    launcher = ROOT / "test" / "launch_with_config.py"
     result = subprocess.run([sys.executable, "-X", "utf8", str(launcher), module, str(config), *args],
-                            cwd=root, capture_output=True, encoding="utf-8", timeout=180)
+                            cwd=ROOT, capture_output=True, encoding="utf-8", timeout=180)
     events = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
     assert result.returncode == code, (module, result.returncode, events)
     return result.stdout, events, result.stderr
 
 
-def exercise(db, config, evidence, legacy_root=None):
+def exercise(db, config, evidence):
     with db.cursor() as cur:
         foreign = str(uuid4())
         cur.execute("INSERT INTO conversation_sessions VALUES (%s, %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))",
@@ -50,9 +50,9 @@ def exercise(db, config, evidence, legacy_root=None):
             cur.execute("SELECT consumer_id, preference_key, value FROM consumer_preferences ORDER BY consumer_id")
             return cur.fetchall()
 
-        def turn(message, *, session=None, status=None, root=ROOT):
+        def turn(message, *, session=None, status=None):
             args = ("--session", session) if session else ()
-            output, events, _ = run("cli", config, *args, "--message", message, root=root)
+            output, events, _ = run("cli", config, *args, "--message", message)
             session_id, reply = output.rstrip("\n").split("\n", 1)
             sid = session_id.removeprefix("会话：")
             loaded = next(event for event in events if event["event"] == "session_loaded")
@@ -77,9 +77,8 @@ def exercise(db, config, evidence, legacy_root=None):
         foreign_row = (("DEMO-USER-02", "response_detail", "detailed"),)
         brief_row = ((CONSUMER_ID, "response_detail", "brief"), *foreign_row)
         detailed_row = ((CONSUMER_ID, "response_detail", "detailed"), *foreign_row)
-        first, reply, _ = turn("请记住，以后用中文简短回答。", status="updated", root=legacy_root or ROOT)
+        first, reply, _ = turn("请记住，以后用中文简短回答。", status="updated")
         assert "已保存" in reply and "简短" in reply and details() == brief_row
-        evidence["legacy_host_wrote_first_turn"] = legacy_root is not None
         second, reply, _ = turn("查看我的长期偏好。", status="listed")
         assert second != first and "简短" in reply and "详细" not in reply
         order = "查一下 DEMO-1001"
@@ -156,7 +155,7 @@ def exercise(db, config, evidence, legacy_root=None):
         evidence["isolated_consumer_and_write_failures"] = True
 
 
-def verify(source, evidence, legacy_root=None):
+def verify(source, evidence):
     settings = load_config(source)
     name = f"order_demo_issue11_{uuid4().hex[:16]}"
     with socket.socket() as probe:
@@ -167,8 +166,6 @@ def verify(source, evidence, legacy_root=None):
     payload["mcp"] = {"url": f"http://127.0.0.1:{port}/mcp", "port": port, "read_token": secrets.token_urlsafe(32)}
     payload.pop("policy", None)
     payload.pop("refund_policy_events_dir", None)
-    if legacy_root is not None:
-        payload["qwen"].setdefault("api_key", "unused-by-local-qwen")
 
     with tempfile.TemporaryDirectory(prefix="order-demo-issue11-") as directory:
         config = Path(directory) / "settings.json"
@@ -198,7 +195,7 @@ def verify(source, evidence, legacy_root=None):
                                 time.sleep(0.1)
                         else:
                             raise TimeoutError("isolated MCP server did not start")
-                        exercise(db, config, evidence, legacy_root)
+                        exercise(db, config, evidence)
                     finally:
                         if server.poll() is None:
                             if sys.platform == "win32":
@@ -228,10 +225,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
-    parser.add_argument("--legacy-root", type=Path, help="由指定检出写入首条偏好、原文和 checkpoint")
     args = parser.parse_args()
     report = {"python": sys.version.split()[0], "versions": {name: version(name) for name in (
         "sqlalchemy", "pymysql", "langgraph", "langgraph-checkpoint-mysql", "deepagents", "mcp", "langchain-openai",
     )}, "turns": []}
-    verify(args.config, report, args.legacy_root.resolve() if args.legacy_root else None)
+    verify(args.config, report)
     args.evidence.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

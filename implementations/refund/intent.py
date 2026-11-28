@@ -1,41 +1,77 @@
-"""识别消费者的退款相关意图并核对本轮提供的订单号。"""
+"""识别本轮退款相关意图、查单目标及独立的退款办理指令。"""
 
+import json
 import re
 from collections.abc import Callable
 
 from openai import OpenAIError
 
 from config.limits import RefundLimits
-from implementations.orders.reply import ORDER_QUERY_INCOMPLETE
+from implementations.refund.intent_prompt import INTENT_PROMPT
 from implementations.refund.preference_intent import parse_preference_intent
 from interfaces.refund.decision import Decide
 from model.refund.flow import ConversationDecision, ExchangeMessage
-from model.refund.intent import IntentResolution
-from model.refund.status import ConversationIntent, OrderGoal
+from model.refund.intent import IntentDecision, IntentResolution
+from model.refund.status import (
+    ConversationIntent, ConversationRole, IntentEvent, OrderGoal, OrderIdExtractionStatus, PolicyRequest,
+)
 
 ORDER_NUMBER = re.compile(r"(?<![A-Za-z0-9-])DEMO-[A-Za-z0-9-]+", re.IGNORECASE)
+_REFUND_ORDER_LABEL = r"(?:(?:这笔\s*)?(?:订单(?:编号|号)?|编号)\s*(?:是|为)?\s*[：:]?\s*)"
 _DIRECT_REFUND = re.compile(
-    r"(?:如果(?:能退|符合退款条件)[，,]\s*(?:就\s*)?)?"
+    r"(?:(?:如果)?(?:能退|符合退款条件)(?:[，,]\s*(?:就\s*)?|就\s*))?"
     r"(?:请\s*)?(?:帮我|给我|为我|我要)\s*"
-    rf"(?:(?:办理|申请)?\s*退(?:款|掉)?\s*(?P<order>{ORDER_NUMBER.pattern})|"
+    rf"(?:(?:办理|申请)?\s*退(?:款|掉)?\s*{_REFUND_ORDER_LABEL}?(?P<order>{ORDER_NUMBER.pattern})|"
     rf"(?:办理|申请)\s*(?P<order_first>{ORDER_NUMBER.pattern})\s*的?\s*退款)[。！!]?", re.IGNORECASE,
 )
+_REFUND_WITHOUT_ORDER = re.compile(
+    r"(?:那就\s*)?(?:请\s*)?(?:(?:帮我|给我|为我|我要)\s*)?"
+    r"退(?:款|掉)?\s*(?:刚才那[笔单]|之前那[笔单]|上一单)?(?:吧)?[。！!]?$"
+)
+_REFUND_ORDER_REQUIRED = "请在同一条消息中明确要求退款，并写出唯一的演示订单编号。"
 _REFUND_PREFERENCE = re.compile(
     r"[，,]\s*我希望(?:只?退\s*\d+(?:\.\d+)?\s*(?:元|分)(?:到其他账户)?|退到其他账户|换用其他渠道)"
     r"(?:[，,]\s*(?:使用|换用)其他渠道)?[。！!]?$"
 )
 _REFUND_CONDITION = re.compile(r"只有|否则|才(?:退|办|同意|可以)|必须|前提|不然")
+_POLICY_REFERENCE = re.compile(r"政策|条款|条文|依据|规定|规则|原文|细则|官方文件|哪一?条")
+_POLICY_REVIEW_WORDS = re.compile(r"先看|看完|读完")
+_POLICY_BASIS = rf"(?:这笔订单的|适用的?|正式|官方|相关|退款|政策|哪一?条)*(?:{_POLICY_REFERENCE.pattern})"
+_INDEPENDENT_POLICY_QUESTION = re.compile(
+    r"[，,。；;]\s*(?:并且?|顺便|同时|另(?:外)?|然后)\s*(?:请\s*)?"
+    rf"(?:(?:告诉我|说明|解释|提供|附上|问)\s*{_POLICY_BASIS}|(?:把|将)\s*{_POLICY_BASIS}\s*(?:发给我|给我看))"
+    r"[。！？!?]?$"
+)
+_DEFERRED_REFUND_WORDS = re.compile(
+    r"如果|要是|如能|等(?:我|你|到)|等待|待核实|先|看完|再(?:决定|考虑)|前提|找[到得]|查[到得出]"
+)
 _REFUND_OVERRIDE = re.compile(r"其他账户|其他渠道|只退|退\s*\d+")
 _REFUND_REQUEST_WORDS = re.compile(
     r"(?:帮我|给我|为我|我(?:要|想|需要|申请)|请|直接|立即)\s*"
     r"(?:(?:帮我|给我|为我|把|将|对|申请|办理|提交|执行|直接)\s*){0,3}"
     rf"(?:{ORDER_NUMBER.pattern}\s*的?\s*)?退(?:款|掉|一下)?|"
-    r"(?:^|[，,。；;])\s*(?:申请|办理|帮忙办理)\s*退款",
+    r"(?:^|[，,。；;])\s*(?:申请|办理|帮忙办理)\s*退款|"
+    rf"^\s*(?:请\s*)?退(?:款|掉)?\s*(?={ORDER_NUMBER.pattern}[。！!]?\s*$)",
     re.IGNORECASE,
 )
-_REFUND_NEGATION = re.compile(r"(?:不要|不用|无需|先别|先不|暂不|不需要|取消|别)\s*(?:再|帮我|办理)?\s*退(?:款)?")
+_REFUND_NEGATION = re.compile(
+    r"(?:不要|不用|无需|先别|先不|暂不|不需要|不想|取消|别)\s*(?:(?:再|帮我|办理|申请|提交|执行|给我|为我)\s*)*"
+    rf"(?:{ORDER_NUMBER.pattern}\s*的?\s*)?退(?:款)?", re.IGNORECASE,
+)
+# 仅检查候选措辞或编号前的引导语，客服事实说明后的独立指令仍可授权。
+_REFUND_NON_DIRECTIVE_PREFIX = re.compile(
+    r"(?:(?:假[设如]|假定|设想)(?!\s*(?:能退|符合退款条件)\s*[，,])|"
+    r"(?:如果|要是)\s*(?:我|你|有人|别人)\s*(?:说|问|请|请求|要求|要|想|提出|$))"
+    r"[^。！？!?；;\n]*$|"
+    r"(?:举(?:个|一个)?例(?:子)?|比如说|比方说|例如|"
+    r"(?:有人|别人|客服|朋友|同事)(?:刚才|之前|曾经)?(?:说|问|提到))"
+    r"(?:\s*[：:][^。！？!?；;\n]*|\s*[，,]?\s*)$"
+)
 
-_QUOTED_TEXT = re.compile(r'“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"')
+_QUOTED_TEXT = re.compile(r'“[^”]*”|‘[^’]*’|「[^」]*」|『[^』]*』|"[^"]*"' r"|'[^'\n]*'")
+_REFUND_ORDER_AFTER_REQUEST = re.compile(rf"\s*[，,：:]?\s*{_REFUND_ORDER_LABEL}?")
+_REFUND_ORDER_TOPIC = re.compile(rf"(?:^|[。；;！？!?\n，,])\s*(?:关于\s*|{_REFUND_ORDER_LABEL})?$")
+_REFUND_ORDER_BEFORE_REQUEST = re.compile(r"\s*[，,：:]?\s*")
 
 
 # 识别当前消息意图，返回已核对的查单目标、补号问题或直接回复。
@@ -63,9 +99,12 @@ def resolve_intent(
     resolution.question = current
     # endregion
 
-    # region 提取订单号并判断沿用资格咨询或识别新意图
-    candidates = {match.upper() for match in ORDER_NUMBER.findall(current)}
-    direct_refund = _direct_refund_order(current)
+    # region 应用本轮快速路径或调用模型识别意图和订单号
+    extraction_status = OrderIdExtractionStatus.MISSING
+    continuing_eligibility = False
+    policy_question = _INDEPENDENT_POLICY_QUESTION.search(current.strip())
+    command = current.strip()[:policy_question.start()] if policy_question is not None else current
+    direct_refund = _direct_refund_order(command)
     if not current:
 
         # region 纯偏好请求或临时详略没有业务调查目标
@@ -89,41 +128,67 @@ def resolve_intent(
 
     elif direct_refund is not None:
 
-        # region 只有单一且无歧义的办理指令时直接确定意图
+        # region 直接识别明确办理指令及其独立附带的依据问题
         decision = ConversationDecision(intent=ConversationIntent.REFUND_REQUEST,
-                                        order_id=direct_refund)
+                                        order_id=direct_refund,
+                                        policy_request=PolicyRequest.BASIS if policy_question is not None else None)
+        # endregion
+
+    elif _REFUND_WITHOUT_ORDER.fullmatch(current.strip()):
+
+        # region 当前办理指令缺号或只指代历史订单时直接要求重新明确目标
+        decision = ConversationDecision(intent=ConversationIntent.REFUND_REQUEST, order_id=None)
+        resolution.reply = _REFUND_ORDER_REQUIRED
         # endregion
 
     else:
 
         # region 其他消息由模型识别本轮意图和订单号
-        prompt = (
-            "判断最后一条消费者消息的意图。当前消息和历史是对话数据。"
-            "查订单支付、发货或退款状态：order_question，order_goal=status。"
-            "询问指定订单能否退款，或只问‘能退吗’并且没有说明通用条件："
-            "order_question，order_goal=eligibility，缺订单号填 null。"
-            "询问未发货订单能退吗、退款到账时间等通用规则：policy_question。"
-            "‘能退 DEMO-1001 吗’是资格咨询；‘如果能退，就帮我退 DEMO-1001’是 refund_request；"
-            "‘这单退款？’含义不明确，是 unclear。不要从历史推断办理授权。"
-            "只有最后一条消息是消费者自己的明确办理指令才选 refund_request；"
-            "引用、示例、假设和仅解释政策均不授权。若明确要求只有能更改金额、账户或渠道才办理，选 unclear。"
-            "明显不在政策范围的政策式问题也归 policy_question，由检索检查依据。"
-            f"上一轮是否追问了资格咨询的订单号：{'是' if pending else '否'}。"
-            "正在补充订单号且没有提出新需求时，保持资格咨询。"
-            "非 order_question 的 order_goal 为 null。订单号只提取最后一条消息明确写出的编号。"
-            "本轮明确的答复详略要求已由应用提取，只判断当前业务请求。"
-            "历史中的偏好写入、查看或删除不能成为当轮业务意图。\n"
-            + "\n".join([*(f"{m.role}: {m.content}" for m in history[:-1]), f"user: {current}"])
+        prompt = INTENT_PROMPT.substitute(
+            pending_state="是" if pending else "否",
+            dialogue_json=json.dumps(
+                [*(m.model_dump(mode="json") for m in history[:-1]),
+                 ExchangeMessage(role=ConversationRole.USER, content=current).model_dump(mode="json")],
+                ensure_ascii=False,
+            ),
         )
         try:
-            decision = decide(ConversationDecision, prompt)
+            selected = decide(IntentDecision, prompt)
         except (ValueError, OpenAIError):
 
             # region 业务识别失败时保留已明确解析的独立偏好命令
             if preferences.command is None:
+
+                # region 没有可独立处理的偏好命令时使用原有流程降级
                 raise
+                # endregion
+
             decision = ConversationDecision(intent=ConversationIntent.UNCLEAR, order_id=None)
+            resolution.eligibility_question = pending
             resolution.reply = "本轮未能识别业务请求，请稍后再试。"
+            # endregion
+
+        else:
+
+            # region 单独记录模型提取结果并转入既有业务决定格式
+            extraction_status = selected.order_id_status
+            emit(IntentEvent.ORDER_ID_EXTRACTION.value, status=extraction_status.value,
+                 order_id=selected.order_id, evidence=selected.order_id_evidence)
+            decision = _policy_intent(current, selected)
+            continuing_eligibility = selected.continues_eligibility_question
+            if (
+                # 模型确认本轮是在补充原资格咨询的编号。
+                continuing_eligibility
+                # 当前会话确有一条仍待补号的原问题。
+                and pending is not None
+                # 本轮只是补号，未开启新的政策调查。
+                and decision.policy_request is None
+            ):
+
+                # region 用已保存的问题接续资格咨询
+                resolution.question = pending
+                # endregion
+
             # endregion
 
         # endregion
@@ -133,7 +198,7 @@ def resolve_intent(
     # region 记录本轮意图并更新识别结果
     decision.memory_request = preferences.command
     decision.temporary_detail = preferences.temporary_detail
-    emit("intent", decision=decision.model_dump())
+    emit(IntentEvent.DECISION.value, decision=decision.model_dump())
     resolution.decision = decision
     if resolution.reply is not None:
 
@@ -163,12 +228,20 @@ def resolve_intent(
         case ConversationIntent.REFUND_REQUEST:
 
             # region 明确办理仅绑定本轮唯一且有效的订单号
-            unquoted = _QUOTED_TEXT.sub(" ", current)
+            candidates = {match.upper() for match in ORDER_NUMBER.findall(current)}
+            unquoted = _QUOTED_TEXT.sub(_mask_refund_quote, current)
+            directives = [
+                request
+                for request in _REFUND_REQUEST_WORDS.finditer(unquoted)
+                if _REFUND_NON_DIRECTIVE_PREFIX.search(unquoted[:request.start()]) is None
+            ]
             if (
-                # 办理措辞只能来自消费者自己的本轮指令，引用不产生授权。
-                _REFUND_REQUEST_WORDS.search(unquoted) is None
+                # 没有消费者本轮独立发出的办理指令，引用、假设或转述不产生授权。
+                not directives
                 # 本轮还表达了不办理或撤销，无法确认本次授权。
                 or _REFUND_NEGATION.search(unquoted) is not None
+                # 消费者提及政策后仍无法确认有独立的当轮办理指令。
+                or _depends_on_policy(current)
                 # 消费者将金额、账户或渠道变更设为办理的条件。
                 or (
                     # 当前表达含有前提或限制。
@@ -177,21 +250,41 @@ def resolve_intent(
                     and _REFUND_OVERRIDE.search(unquoted) is not None
                 )
             ):
+
+                # region 办理意图不明确时追问是否要办理
                 resolution.reply = "请明确说明是否要办理这笔订单的退款。"
                 return resolution
+                # endregion
+
+            identifiable_orders = {
+                match[0].upper()
+                for match in ORDER_NUMBER.finditer(unquoted)
+                if any(_binds_refund_order(unquoted, request, match) for request in directives)
+            }
             if (
                 # 消费者未指定唯一的演示订单。
                 len(candidates) != 1
                 # 模型没有识别到本次办理目标。
                 or decision.order_id is None
-                # 识别出的目标未在本轮原文出现。
-                or decision.order_id.upper() not in candidates
+                # 识别出的编号没有与本轮独立办理指令关联。
+                or decision.order_id.upper() not in identifiable_orders
                 # 当前订单号超出业务字段长度。
                 or len(decision.order_id) > RefundLimits.MAX_ORDER_ID_CHARS
             ):
-                resolution.reply = "请明确指定一个要办理退款的演示订单编号。"
+
+                # region 未指定唯一有效的办理编号时请消费者重述目标
+                resolution.reply = (
+                    "请明确指定一个要办理退款的演示订单编号。" if len(candidates) > 1
+                    else _REFUND_ORDER_REQUIRED
+                )
+                # endregion
+
             else:
+
+                # region 核验通过的办理编号统一为大写
                 decision.order_id = decision.order_id.upper()
+                # endregion
+
             # endregion
 
         case ConversationIntent.UNCLEAR:
@@ -202,42 +295,37 @@ def resolve_intent(
 
         case ConversationIntent.ORDER_QUESTION:
 
-            # region 查单时核对本轮编号，按结果追问、结束或规范化编号
-            if (
-                # 本轮消息未提供唯一的候选订单号。
-                len(candidates) != 1
-                # 意图识别结果未给出要查的订单号。
-                or decision.order_id is None
-            ):
+            # region 只读查询采用模型选定的编号，缺号或歧义时向消费者追问
+            if decision.order_id is not None:
 
-                # region 未确定唯一编号时追问，缺少资格咨询编号时保留待补问题
-                if (
-                    # 本轮消息没有可识别的订单号。
-                    not candidates
-                    # 消费者正在咨询某笔订单的退款资格。
-                    and decision.order_goal is OrderGoal.ELIGIBILITY
-                ):
-                    resolution.eligibility_question = current
-                    resolution.reply = "请提供要咨询资格的演示订单编号。"
-                else:
-                    resolution.reply = "请提供一个要查询的演示订单编号。"
+                # region 模型或快速补号路径已确定订单，统一使用大写编号
+                decision.order_id = decision.order_id.upper()
                 # endregion
 
-            elif (
-                # 意图识别给出的订单号未出现在消费者本轮消息中。
-                decision.order_id.upper() not in candidates
-                # 意图识别给出的订单号超过长度上限。
-                or len(decision.order_id) > RefundLimits.MAX_ORDER_ID_CHARS
-            ):
+            elif extraction_status is OrderIdExtractionStatus.AMBIGUOUS:
 
-                # region 编号与原文不符或超长时停止查单
-                resolution.reply = ORDER_QUERY_INCOMPLETE
+                # region 目标不明确时请指定一笔订单，接续中的资格问题继续等待补号
+                resolution.eligibility_question = pending if continuing_eligibility else None
+                resolution.reply = "请明确指定一个要查询的演示订单编号。"
+                # endregion
+
+            elif decision.policy_request is not None:
+
+                # region 订单政策咨询须重新明确本轮要核实的订单和政策问题
+                resolution.reply = "请提供要咨询政策依据的演示订单编号，并说明要核实的问题。"
+                # endregion
+
+            elif decision.order_goal is OrderGoal.ELIGIBILITY:
+
+                # region 缺号的资格咨询保存问题，供本会话补号后接续
+                resolution.eligibility_question = resolution.question
+                resolution.reply = "请提供要咨询资格的演示订单编号。"
                 # endregion
 
             else:
 
-                # region 编号核验通过后统一为大写
-                decision.order_id = decision.order_id.upper()
+                # region 查订单状态缺号时要求提供本轮编号
+                resolution.reply = "请提供一个要查询的演示订单编号。"
                 # endregion
 
             # endregion
@@ -249,6 +337,131 @@ def resolve_intent(
             # endregion
 
     return resolution
+    # endregion
+
+
+# 采用本轮政策需求，并阻止有政策前提的请求进入办理。
+def _policy_intent(current: str, selected: IntentDecision) -> ConversationDecision:
+
+    # region 将模型识别结果转为本轮意图，并用消费者原文核对政策前提
+    mentions_policy = _POLICY_REFERENCE.search(current) or _POLICY_REVIEW_WORDS.search(current)
+    decision = ConversationDecision(intent=selected.intent, order_id=selected.order_id, order_goal=selected.order_goal,
+                                    policy_request=selected.policy_request if mentions_policy else None)
+    depends_on_policy = _depends_on_policy(current)
+    # endregion
+
+    # region 将先看条款和独立政策问题转入只读调查
+    if (
+        # 消费者把条款设为办理前提，或表示看完条款再决定。
+        decision.policy_request is PolicyRequest.BEFORE_REFUND
+        # 模型提取了依据问题，但办理部分无法独立确认。
+        or (
+            # 模型同时识别为办理。
+            decision.intent is ConversationIntent.REFUND_REQUEST
+            # 原文没有可独立核验的办理指令。
+            and depends_on_policy
+            # 仍能从模型结果或原文确认消费者提出了政策问题。
+            and (
+                # 模型明确提取了政策问题。
+                decision.policy_request is PolicyRequest.BASIS
+                # 消费者原文指出办理必须等待政策核实。
+                or _DEFERRED_REFUND_WORDS.search(current) is not None
+            )
+        )
+    ):
+
+        # region 有政策前提时保留订单咨询的目标，通用政策问题无须补号
+        decision.policy_request = PolicyRequest.BEFORE_REFUND
+        if (
+            # 消费者明确询问某笔订单，即使缺号也须追问。
+            selected.intent is ConversationIntent.ORDER_QUESTION
+            # 已提供目标或存在多个待澄清的订单。
+            or selected.order_id_status is not OrderIdExtractionStatus.MISSING
+        ):
+            decision.intent = ConversationIntent.ORDER_QUESTION
+        else:
+            decision.intent = ConversationIntent.POLICY_QUESTION
+        # endregion
+
+    if (
+        # 需要按本人订单事实解释条款的适用性。
+        decision.intent is ConversationIntent.ORDER_QUESTION
+        # 本轮明确提出了政策问题。
+        and decision.policy_request is not None
+    ):
+
+        # region 用资格调查读取本人订单事实，供正式条款核验
+        decision.order_goal = OrderGoal.ELIGIBILITY
+        # endregion
+
+    return decision
+    # endregion
+
+
+# 遮盖转述或举例内容，同时保留单独用引号标示的订单号。
+def _mask_refund_quote(quote: re.Match[str]) -> str:
+
+    # region 引用正文作为句子边界，单独的订单号仍需与办理指令关联
+    content = quote[0][1:-1].strip()
+    return f" {content} " if ORDER_NUMBER.fullmatch(content) else "。"
+    # endregion
+
+
+# 确认混合请求中存在独立于政策的办理指令，避免将政策前提视为当前授权。
+def _depends_on_policy(text: str) -> bool:
+
+    # region 普通办理无需额外区分政策意图
+    if _POLICY_REFERENCE.search(text) is None:
+
+        # region 当前消息未提及政策
+        return False
+        # endregion
+
+    # endregion
+
+    # region 只有明确办理后另附单独的依据问题时才识别为当轮独立授权
+    message = text.strip()
+    question = _INDEPENDENT_POLICY_QUESTION.search(message)
+    if question is None:
+
+        # region 混合请求未明确拆分时等待消费者重新授权
+        return True
+        # endregion
+
+    command = message[:question.start()]
+    if _direct_refund_order(command) is not None:
+
+        # region 前段本身是明确指令，后段只补充索要依据
+        return False
+        # endregion
+
+    # region 前段仍有政策或等待条件时不得采用后段问题来证明办理独立
+    return _POLICY_REFERENCE.search(command) is not None or _DEFERRED_REFUND_WORDS.search(command) is not None
+    # endregion
+    # endregion
+
+
+# 判定编号是否为这条办理指令的目标，避免采用其他请求中的编号。
+def _binds_refund_order(text: str, request: re.Match[str], order: re.Match[str]) -> bool:
+
+    # region 核对编号与办理指令的相对位置和连接内容
+    if request.end() <= order.start():
+
+        # region 指令后紧接订单号或编号标签时绑定目标
+        return _REFUND_ORDER_AFTER_REQUEST.fullmatch(text[request.end():order.start()]) is not None
+        # endregion
+
+    if order.end() <= request.start():
+
+        # region 先单独交代书面编号再明确办理时绑定该订单
+        return (
+            _REFUND_ORDER_TOPIC.search(text[:order.start()]) is not None
+            and _REFUND_ORDER_BEFORE_REQUEST.fullmatch(text[order.end():request.start()]) is not None
+        )
+        # endregion
+
+    # region 指令本身包含订单号时直接绑定目标
+    return True
     # endregion
 
 

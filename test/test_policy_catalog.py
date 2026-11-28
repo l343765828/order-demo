@@ -94,9 +94,9 @@ def test_blocked_baseline_cannot_be_reclassified_or_clear_legacy_entries():
     backend.read_version.return_value = document.entries
     backend.recall.return_value = [document.entries[0]]
     backend.rerank.return_value = [document.entries[0]]
-    result = publish_policy(document, publisher='test', qualification=QualificationConfirmation.UNCHANGED,
-                            catalog=catalog, open_backend=open_backend)
-    assert result.catalog_revision == 1
-    assert attempt.activate.call_args.kwargs['adoption'].source_digest == document.source_digest
+    with pytest.raises(ValueError, match='缺少发布记录'):
+        publish_policy(document, publisher='test', qualification=QualificationConfirmation.UNCHANGED,
+                       catalog=catalog, open_backend=open_backend)
+    attempt.activate.assert_not_called()
     backend.clear_version.assert_not_called()
     backend.publish.assert_not_called()

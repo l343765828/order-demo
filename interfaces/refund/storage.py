@@ -3,7 +3,7 @@
 from typing import Protocol
 
 from model.refund.submission import (
-    AuthorizedRefundIntent, GetRefundResultRequest, RefundLookupResult, RefundPolicyVerification,
+    AuthorizedRefundIntent, GetRefundResultRequest, PreparedRefund, RefundLookupResult,
     RefundResult, SubmitMockRefundRequest,
 )
 
@@ -36,7 +36,7 @@ class RefundDispatchService(Protocol):
         # endregion
 
     # 保存当前提交，只有确认新记录已提交才返回 True。
-    def reserve_dispatch(self, event: RefundPolicyVerification) -> bool:
+    def reserve_dispatch(self, prepared: PreparedRefund) -> bool:
 
         # region 声明提交保存契约
         ...

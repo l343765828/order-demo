@@ -1,4 +1,4 @@
-"""在真实后端的隔离库和集合验收模拟退款与办理政策核验。"""
+"""在真实后端的隔离库和集合验收模拟退款及政策解释。"""
 
 import argparse
 import asyncio
@@ -28,27 +28,33 @@ sys.path.insert(0, str(ROOT))
 from config import load_config, use_config
 from config.demo import CONSUMER_ID, DemoPolicy
 from implementations.policy.backend import PolicyBackend
-from implementations.policy.source import SOURCE_PATH, parse_policy
+from implementations.policy.catalog import MySQLPolicyCatalog
+from implementations.policy.source import SOURCE_PATH, parse_policy, read_policy_document
+from utils.database import create_mysql_engine
 from utils.mysql import connection_config
 from model.orders.query import OrderQueryResult
 from model.orders.status import PaymentStatus, ShippingStatus
 from model.policy.search import PolicySearchResult, SearchPolicyRequest
-from model.policy.status import PolicyEligibilityOutcome, PolicyEvent, PolicyOrderFact
-from model.refund.flow import ConversationDecision, InvestigationPlan, InvestigationStep, OrderToolEvent, PolicyToolEvent
+from model.policy.status import PolicyEligibilityOutcome, PolicyEvent, PolicyOrderFact, PolicySearchStatus
+from model.refund.flow import InvestigationPlan, InvestigationStep, OrderToolEvent, PolicyToolEvent
+from model.refund.intent import IntentDecision
 from model.refund.status import ConversationIntent, InvestigationKind, OrderGoal
-from model.refund.status import RefundEvent, RefundOutcome, RefundReason
+from model.refund.status import DispatchStatus, RefundEvent, RefundOutcome, RefundReason
 from model.refund.submission import GetRefundResultRequest, RefundResult, SubmitMockRefundRequest
 from utils.events import log_event
 from utils.mcp_client import bind_mcp_tool, mcp_correlation_meta, open_mcp_client
 from launch_with_config import application_command
-from policy_condition_checks import assert_complete_policy_extraction, extracted_policy_rules
+from policy_condition_checks import extracted_policy_rules
 from verify_order_cli import read_events
 from verify_policy_catalog import cli_publish
 
 RENAMED_CLAUSE = 'RF-083'
 RENAMED_TEXT = '仅限已付款且尚未发货的本人订单按原支付渠道退回整笔实付款，已有成功模拟退款记录的订单除外。'
 POLICY_CONDITIONS_GROUP = 'policy-conditions'
+EXPLICIT_POLICY_GROUP = 'explicit-policy'
 OMITTED_SHIPPING = 'omitted_shipping'
+CUTOVER_VERSION = '1.1'
+CUTOVER_SOURCE = SOURCE_PATH.with_name(f'refund-policy-{CUTOVER_VERSION}.md')
 
 
 def application(module, config, *args, fault=None):
@@ -149,51 +155,33 @@ def submit_calls(log, trace_id):
             if e['event'] == 'mcp_submit_mock_refund' and e['trace_id'] == trace_id]
 
 
-def check_success(config, cursor, log, events_dir, *, renumbered=False):
+def check_success(config, cursor, log, events_dir):
     turn = cli_turn(config, refund_request('DEMO-1001'), '模拟退款成功')
     assert 'DEMO-1001' in turn['reply'] and '¥199.00' in turn['reply']
     events = turn['events']
     names = [event['event'] for event in events]
-    for name in ('graph_node', 'plan', 'execute', 'deepagent_delegate', 'react_call', 'mcp_observation', 'replan'):
+    for name in ('graph_node', 'plan', 'execute', 'observe', 'replan'):
         assert name in names, name
-    position = [names.index(name) for name in ('refund_policy_verified', 'refund_dispatch_saved',
-                                               'refund_submit', 'refund_result')]
+    position = [names.index(name) for name in ('refund_dispatch_saved', 'refund_submit', 'refund_result')]
     assert position == sorted(position)
-    assert not any(name in names[position[2] + 1:] for name in (
-        'intent', 'deepagent_delegate', 'react_call', 'policy_selection', 'policy_eligibility_extraction',
-    ))
+    assert not {'refund_policy_verified', 'policy_selection', 'policy_eligibility_extraction'}.intersection(names)
     stored, refunds = records(cursor, 'DEMO-1001')
     (key, status, refund_id, trace, error), = stored
     assert (status, trace, error) == ('succeeded', turn['trace_id'], None)
     assert refunds == ((refund_id, 19900, key),)
     assert refund_id in turn['reply']
-    policy_event = json.loads((events_dir / f'{key}.jsonl').read_text(encoding='utf-8'))
-    assert policy_event['trace_id'] == trace and policy_event['idempotency_key'] == key
-    authorization = policy_event['authorization']
+    assert not list(events_dir.iterdir())
+    [authorization] = [event['authorization'] for event in events if event['event'] == 'refund_dispatch_saved']
     assert authorization['session_id'] == turn['session_id'] and authorization['order_id'] == 'DEMO-1001'
     cursor.execute("SELECT m.role,m.content FROM refund_dispatches d JOIN conversation_messages m "
                    "ON m.session_id=d.session_id AND m.sequence=d.source_message_sequence WHERE d.idempotency_key=%s",
                    (key,))
     assert cursor.fetchone() == ('user', turn['prompt'])
-    server_events = mcp_events(log)
-    recalls = [event for event in server_events if event['event'] == 'probe_vector_recall']
-    assert recalls and all('entry_type == "policy"' in event['filter'] for event in recalls)
-    policy_calls = [event for event in server_events
-                    if event['event'] == 'mcp_search_policy' and event['trace_id'] == trace]
-    assert policy_calls and all(e['mode'] == 'formal' and e['pid'] != events[0]['pid'] for e in policy_calls)
-    assert {citation['event_id'] for citation in policy_event['evidence']['citations']} <= {
-        event['policy_event_id'] for event in policy_calls
-    }
-    retrieved = [event for event in server_events if event['event'] == 'policy_retrieval'
-                 and event['policy_event_id'] in {e['policy_event_id'] for e in policy_calls}]
-    assert_exact_policy_citation(policy_event['evidence'], retrieved, '2.0' if renumbered else DemoPolicy.BASELINE_VERSION)
-    if renumbered:
-        [citation] = policy_event['evidence']['citations']
-        assert citation['clause_id'] == RENAMED_CLAUSE and RENAMED_TEXT in citation['excerpt']
+    assert not any(event['event'] == 'mcp_search_policy' and event['trace_id'] == trace for event in mcp_events(log))
     write, = submit_calls(log, trace)
     assert write['idempotency_key'] == key and write['pid'] != events[0]['pid']
-    return {'case': 'success', **turn, 'policy_event': policy_event, 'recalls': recalls,
-            'mcp': [*policy_calls, write], 'policy_retrieval': retrieved, 'database': {'dispatch': stored, 'refund': refunds}}
+    return {'case': 'success', **turn, 'policy_calls': 0, 'mcp': [write],
+            'database': {'dispatch': stored, 'refund': refunds}}
 
 
 def assert_exact_policy_citation(evidence, retrieved, version):
@@ -241,15 +229,6 @@ def check_omitted_shipping(config, cursor, log, events_dir):
     assert not submit_calls(log, turn['trace_id'])
     return {'case': OMITTED_SHIPPING, **turn, 'mcp': searches, 'final_policy_events': 0,
             'refund_dispatches': 0, 'refund_records': 0, 'refund_write_calls': 0}
-
-
-def check_complete_conditions(config, cursor, log, events_dir):
-    result = check_success(config, cursor, log, events_dir, renumbered=True)
-    [citation] = result['policy_event']['evidence']['citations']
-    assert citation['excerpt'] == RENAMED_TEXT
-    assert_complete_policy_extraction(result['events'], citation)
-    assert len(list(events_dir.iterdir())) == 1
-    return result
 
 
 async def direct_submission(config, order, key, *, writer=True, arguments=None):
@@ -415,8 +394,6 @@ def observe_cli_db_boundary(settings):
 
     def check_send(mcp, request, trace, **kwargs):
         assert not active
-        path = Path(settings.refund_policy_events_dir) / f'{request.idempotency_key}.jsonl'
-        assert json.loads(path.read_text(encoding='utf-8'))['trace_id'] == trace
         with pymysql.connect(database=settings.mysql.database, autocommit=True,
                              **connection_config(settings.mysql)) as db, db.cursor() as cursor:
             stored, refunds = records(cursor, request.order_id)
@@ -463,14 +440,23 @@ def install_investigation_probe():
                                query=step.query, result=asyncio.run(fetch()))
 
     def read_only_probe(self, schema, prompt, /):
-        if schema is ConversationDecision:
-            assert prompt.strip().endswith('查一下 DEMO-1003')
-            return ConversationDecision(intent=ConversationIntent.ORDER_QUESTION, order_id='DEMO-1003',
-                                        order_goal=OrderGoal.STATUS)
+        if schema is IntentDecision:
+            message = json.loads(prompt.splitlines()[-1])[-1]['content']
+            order = next((word.rstrip('？') for word in message.split() if word.startswith('DEMO-')), None)
+            if message.startswith(('查一下', '能否退款', '请帮我退刚才')):
+                if message.startswith('请帮我退'):
+                    return IntentDecision(intent=ConversationIntent.REFUND_REQUEST, order_id=None, order_goal=None,
+                                          order_id_status='missing', order_id_evidence=None,
+                                          continues_eligibility_question=False)
+                return IntentDecision(intent=ConversationIntent.ORDER_QUESTION, order_id=order,
+                                      order_goal=OrderGoal.STATUS if message.startswith('查一下') else OrderGoal.ELIGIBILITY,
+                                      order_id_status='extracted', order_id_evidence=order,
+                                      continues_eligibility_question=False)
         if schema is InvestigationPlan:
-            assert 'DEMO-1003' in prompt
+            order = prompt.split()[1]
+            assert order.startswith('DEMO-')
             return InvestigationPlan(steps=[InvestigationStep(
-                step_id='order', kind=InvestigationKind.INSPECT_ORDER, order_id='DEMO-1003',
+                step_id='order', kind=InvestigationKind.INSPECT_ORDER, order_id=order,
                 depends_on=[], completion='读取原退款订单状态',
             )])
         return decide(self, schema, prompt)
@@ -480,7 +466,7 @@ def install_investigation_probe():
 
 
 def install_cli_fault(fault, settings):
-    from implementations.refund import controlled_tools, dispatches, execution, reply
+    from implementations.refund import controlled_tools, dispatches, reply
     from sqlalchemy.exc import OperationalError
 
     def ship(order):
@@ -489,16 +475,7 @@ def install_cli_fault(fault, settings):
             cursor.execute("UPDATE orders SET shipping_status='shipped' WHERE order_id=%s", (order,))
             assert cursor.rowcount == 1
 
-    if fault in ('event_before', 'event_ack'):
-        persist = execution.persist_event
-
-        def lose_event(*args, **kwargs):
-            if fault == 'event_ack':
-                persist(*args, **kwargs)
-            raise OSError('injected event acknowledgement fault')
-
-        execution.persist_event = lose_event
-    elif fault in ('dispatch_before', 'dispatch_ack'):
+    if fault in ('dispatch_before', 'dispatch_ack'):
         reserve = dispatches.MySQLRefundDispatchService.reserve_dispatch
 
         def lose_dispatch(*args, **kwargs):
@@ -515,14 +492,14 @@ def install_cli_fault(fault, settings):
             return read(settings, order, trace)
 
         controlled_tools.read_order = read_changed
-    elif fault == 'bad_citation':
-        review = execution.RefundExecution.review
+    elif fault == 'transaction_shipped':
+        send = controlled_tools.send_refund
 
-        def review_invalid(self, authorization, evidence, *args):
-            evidence.citations[0].event_id = str(uuid4())
-            return review(self, authorization, evidence, *args)
+        def send_after_shipping(settings, request, trace, **kwargs):
+            ship(request.order_id)
+            return send(settings, request, trace, **kwargs)
 
-        execution.RefundExecution.review = review_invalid
+        controlled_tools.send_refund = send_after_shipping
     elif fault == OMITTED_SHIPPING:
         from langchain_core.runnables import RunnableLambda
 
@@ -608,6 +585,38 @@ def check_business(config, cursor, log, record, *, version=DemoPolicy.BASELINE_V
                 'refund_write_calls': 0, 'database': before})
 
 
+def check_transaction_denial(config, cursor, log, record, *, policy_version=None):
+    order = 'DEMO-1015'
+    seed_order(cursor, order)
+    turn = cli_turn(config, refund_request(order), '已发货', fault='transaction_shipped')
+    related = [e for e in mcp_events(log) if e.get('trace_id') == turn['trace_id']]
+    [write] = [e for e in related if e['event'] == 'mcp_submit_mock_refund']
+    searches = [e for e in related if e['event'] == 'mcp_search_policy']
+    assert write['status'] == RefundOutcome.DENIED
+    stored, refunds = records(cursor, order)
+    assert len(stored) == 1 and stored[0][1:3] == (DispatchStatus.CLOSED_NO_REFUND, None)
+    assert stored[0][4] == RefundReason.SHIPPED
+    assert not refunds
+    [result] = [e['result'] for e in turn['events'] if e['event'] == 'refund_result']
+    assert result['status'] == RefundOutcome.DENIED and result['reason'] == RefundReason.SHIPPED
+    assert '退款办理已拒绝' in turn['reply'] and '未发货' not in turn['reply'] and '未提交退款' not in turn['reply']
+    assert 1 <= len(searches) <= 2
+    assert all(related.index(search) > related.index(write) and search['mode'] == 'formal' for search in searches)
+    if policy_version is not None:
+        retrieved = [e for e in mcp_events(log) if e['event'] == 'policy_retrieval'
+                     and e['policy_event_id'] in {search['policy_event_id'] for search in searches}]
+        [evidence] = [e['evidence'] for e in turn['events'] if e['event'] == 'policy_evidence'
+                      and e['evidence']['status'] == 'sufficient']
+        citation = assert_exact_policy_citation(evidence, retrieved, policy_version)
+        assert '已发货' in citation['excerpt'] and citation['excerpt'] in turn['reply']
+        case = 'transaction_shipped_with_policy'
+    else:
+        assert [e['status'] for e in searches] == [PolicySearchStatus.FAILED] and '暂时无法核实退款政策' in turn['reply']
+        case = 'locked_latest_order'
+    record({'case': case, **turn, 'mcp': related, 'database': [stored, refunds],
+            'refund_write_calls': 1, 'refund_rows': 0})
+
+
 def check_amount(config, cursor, log, record):
     seed_order(cursor, 'DEMO-1005')
     turn = cli_turn(config, '请帮我办理 DEMO-1005 的退款，我希望只退 1 元到其他账户，使用其他渠道。', '模拟退款成功')
@@ -619,14 +628,11 @@ def check_amount(config, cursor, log, record):
 def check_policy_and_storage_faults(config, cursor, log, record):
     marker = config.parent / 'policy-fault'
     dir_events = Path(load_config(config).refund_policy_events_dir)
-    order = 'DEMO-1006'
-    seed_order(cursor, order)
     seed_order(cursor, 'DEMO-1007')
     seed_dispatch(cursor, 'DEMO-1007', revoked=True)
     for fault, reply, orders in (
-        ('rerank', '暂时无法核实退款政策', (order, 'DEMO-1002')),
-        ('empty', '暂时无法核实退款政策', (order, 'DEMO-1004')),
-        ('contradiction', '与办理规则冲突', (order,)),
+        ('rerank', '暂时无法核实退款政策', ('DEMO-1002',)),
+        ('empty', '暂时无法核实退款政策', ('DEMO-1004',)),
         ('denial_contradiction', '与办理规则冲突', ('DEMO-1004',)),
     ):
         marker.write_text(fault, encoding='ascii')
@@ -636,47 +642,34 @@ def check_policy_and_storage_faults(config, cursor, log, record):
             assert not submit_calls(log, turn['trace_id']) and records(cursor, sample) == ((), ())
             assert set(dir_events.iterdir()) == before
             assert '未提交退款' in turn['reply'] and '依据：《' not in turn['reply']
-            if sample != order:
-                assert '退款办理已拒绝' in turn['reply'] and ('未支付' if sample == 'DEMO-1002' else '已发货') in turn['reply']
+            assert '退款办理已拒绝' in turn['reply'] and ('未支付' if sample == 'DEMO-1002' else '已发货') in turn['reply']
             searches = [e for e in mcp_events(log) if e.get('trace_id') == turn['trace_id'] and e['event'] == 'mcp_search_policy']
-            assert searches and all(e['status'] == ('failed' if fault == 'rerank' else 'ok') for e in searches)
+            assert len(searches) == (2 if fault == 'empty' else 1)
+            assert all(e['status'] == ('failed' if fault == 'rerank' else 'ok') for e in searches)
+            if fault == 'empty':
+                assert searches[0]['catalog_revision'] == searches[1]['requested_catalog_revision']
+                queries = [e['evidence']['query'] for e in turn['events'] if e['event'] == 'policy_evidence']
+                assert len(queries) == 2 and all(sample not in query and '已发货' in query for query in queries)
+            if fault == 'denial_contradiction':
+                assert any(e['event'] == 'policy_evidence' and e['evidence']['status'] == 'conflict'
+                           for e in turn['events'])
             record({'case': fault, **turn, 'mcp': searches, 'database': [[], []], 'refund_write_calls': 0})
     marker.unlink()
     storage_faults = (
-        ('bad_citation', '政策依据不足或与订单事实不符', 0, None),
-        ('event_before', '无法确认政策核验事件已保存', 0, None),
-        ('event_ack', '无法确认政策核验事件已保存', 1, None),
-        ('dispatch_before', '无法确认本次提交已保存', 1, None),
-        ('dispatch_ack', '无法确认本次提交已保存', 1, 'pending'),
+        ('dispatch_before', '无法确认本次提交已保存', None),
+        ('dispatch_ack', '无法确认本次提交已保存', 'pending'),
     )
     orders = [f'DEMO-103{index}' for index in range(len(storage_faults))]
     for order in orders:
         seed_order(cursor, order)
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(cli_turn, config, refund_request(order), reply, fault=fault)
-                   for order, (fault, reply, _, _) in zip(orders, storage_faults)]
-    events = [json.loads(path.read_text(encoding='utf-8')) for path in dir_events.glob('*.jsonl')]
-    for order, (fault, _, event_count, submit_state), future in zip(orders, storage_faults, futures):
-        turn = future.result()
+    for order, (fault, reply, submit_state) in zip(orders, storage_faults):
+        turn = cli_turn(config, refund_request(order), reply, fault=fault)
         stored, refunds = records(cursor, order)
         assert not submit_calls(log, turn['trace_id']) and not refunds
         assert [row[1] for row in stored] == ([submit_state] if submit_state else [])
-        assert sum(event['trace_id'] == turn['trace_id'] for event in events) == event_count
-        record({'case': fault, **turn, 'dispatch_status': submit_state, 'event_files_added': event_count,
+        assert not list(dir_events.iterdir())
+        record({'case': fault, **turn, 'dispatch_status': submit_state, 'event_files_added': 0,
                 'refund_write_calls': 0, 'refund_rows': len(refunds)})
-        if fault in ('event_before', 'event_ack'):
-            # 同一种事件故障依旧不阻止查单及已存在的原退款。
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                order_view = executor.submit(cli_turn, config, '查一下 DEMO-1003', '有模拟退款记录', fault=fault)
-                refund_view = executor.submit(cli_turn, config, refund_request('DEMO-1003'), 'MOCK-RF-1003', fault=fault)
-                pending_view = executor.submit(cli_turn, config, refund_request('DEMO-1007'), '结果未确认', fault=fault)
-            independent, existing, pending = order_view.result(), refund_view.result(), pending_view.result()
-            traces = {item['trace_id'] for item in (independent, existing, pending)}
-            direct = [e for e in mcp_events(log) if e.get('trace_id') in traces]
-            assert sorted(e['status'] for e in direct if e['event'] == 'mcp_get_refund_result') == ['found', 'not_found']
-            assert not any(e['event'] in ('mcp_submit_mock_refund', 'mcp_search_policy') for e in direct)
-            record({'case': f'{fault}_read_paths', 'order': independent, 'existing': existing, 'pending': pending,
-                    'mcp': direct})
     marker.write_text('rerank', encoding='ascii')
     try:
         existing = cli_turn(config, refund_request('DEMO-1003'), 'MOCK-RF-1003')
@@ -708,11 +701,8 @@ def check_outcomes(config, cursor, log, record):
     cursor.execute("ALTER TABLE refunds ADD CONSTRAINT check_probe_failure CHECK (order_id <> 'DEMO-1025')")
     for order, *_ in cases:
         seed_order(cursor, order)
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(cli_turn, config, refund_request(order), reply, fault=fault)
-                   for order, fault, reply, *_ in cases]
-    for (order, fault, _, outcome, dispatch, count), future in zip(cases, futures):
-        turn = future.result()
+    for order, fault, reply, outcome, dispatch, count in cases:
+        turn = cli_turn(config, refund_request(order), reply, fault=fault)
         result, = [e['result'] for e in turn['events'] if e['event'] == 'refund_result']
         mcp = [e for e in mcp_events(log) if e.get('trace_id') == turn['trace_id']]
         assert result['status'] == outcome
@@ -723,6 +713,7 @@ def check_outcomes(config, cursor, log, record):
         if fault in ('lost_success', 'lost_denial'):
             names = [e['event'] for e in mcp]
             assert names.index('mcp_submit_mock_refund') < names.index('mcp_get_refund_result')
+            assert 'mcp_search_policy' not in names
         db_fault_cases = {'DEMO-1027': 'rollback_after_insert', 'DEMO-1028': 'commit_ack_lost',
                           'DEMO-1029': 'commit_disconnect'}
         if order in db_fault_cases:
@@ -837,14 +828,10 @@ def check_host_competition(config, cursor, log, record):
     from implementations.refund import controlled_tools
     from implementations.refund.dispatches import MySQLRefundDispatchService
     from implementations.refund.execution import RefundExecution
-    from model.policy.evidence import PolicyCitation, PolicyEvidence
-    from model.policy.status import PolicyEntryType, PolicyEvidenceStatus
-    from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerification
+    from model.refund.submission import AuthorizedRefundIntent, PreparedRefund
     from utils.database import create_mysql_engine
-    from utils.events import persist_event
 
     settings = load_config(config)
-    directory = Path(settings.refund_policy_events_dir)
     order = 'DEMO-1041'
     seed_order(cursor, order)
     engine = create_mysql_engine(settings.mysql)
@@ -864,24 +851,17 @@ def check_host_competition(config, cursor, log, record):
         matching.set()
         return result
 
-    receipt = PolicyCitation(event_id=str(uuid4()), document_id='demo-policy', version='1.0',
-                             clause_id='RF-003', entry_type=PolicyEntryType.POLICY, excerpt='正式条款')
     events = [
-        RefundPolicyVerification(
+        PreparedRefund(
             trace_id=str(uuid4()), idempotency_key=str(uuid4()),
             authorization=AuthorizedRefundIntent(order_id=order, consumer_id=CONSUMER_ID,
                                                  session_id=seed_source(cursor, order), source_message_sequence=1),
-            evidence=PolicyEvidence(question=refund_request(order), query='已付未发货',
-                                    status=PolicyEvidenceStatus.SUFFICIENT, catalog_revision=1, citations=[receipt]),
         )
         for _ in range(2)
     ]
     try:
         service = MySQLRefundDispatchService(engine)
         executor = RefundExecution(service, settings, lambda *args, **kwargs: None)
-        for item in events:
-            persist_event(directory, item.idempotency_key, RefundEvent.POLICY_VERIFIED.value,
-                          **item.model_dump(mode='json'))
         with (patch.object(controlled_tools, 'send_refund', before_send),
               patch.object(controlled_tools, 'read_refund', before_lookup),
               ThreadPoolExecutor(max_workers=2) as pool):
@@ -899,23 +879,171 @@ def check_host_competition(config, cursor, log, record):
         engine.dispose()
 
 
+def check_qualification(config, cursor, log, record, events):
+    def related_calls(turn):
+        return [e for e in mcp_events(log) if e.get('trace_id') == turn['trace_id']
+                and e['event'] in ('mcp_search_policy', 'mcp_submit_mock_refund')]
+
+    for case, prompt, expected in (
+        ('order_status', '查一下 DEMO-1001', '已支付，未发货'),
+        ('eligible_inquiry', '能否退款 DEMO-1001', '符合整单原路退款条件'),
+    ):
+        turn = cli_turn(config, prompt, expected)
+        names = [e['event'] for e in turn['events']]
+        assert names.count('order_id_extraction') == 1 and 'policy_eligibility_extraction' not in names
+        assert not related_calls(turn) and records(cursor, 'DEMO-1001') == ((), ())
+        record({'case': case, **turn, 'policy_calls': 0, 'refund_write_calls': 0, 'refund_rows': 0})
+
+    missing = cli_turn(config, '这笔订单可以退款吗？', '提供要咨询资格')
+    completed = cli_turn(config, 'DEMO-1001', '本轮仅解释资格', session=missing['session_id'])
+    assert '符合整单原路退款条件' in completed['reply']
+    assert [sum(e['event'] == 'order_id_extraction' for e in turn['events']) for turn in (missing, completed)] == [1, 0]
+    assert not related_calls(missing) and not related_calls(completed) and records(cursor, 'DEMO-1001') == ((), ())
+    record({'case': 'cold_read_only_number_followup', 'missing': missing, 'completed': completed,
+            'policy_calls': 0, 'refund_write_calls': 0, 'refund_rows': 0})
+
+    success = check_success(config, cursor, log, events)
+    record(success)
+    stored, refunds = records(cursor, 'DEMO-1001')
+    for case, prompt, expected, order in (
+        ('repeat_original_receipt', refund_request('DEMO-1001'), refunds[0][0], 'DEMO-1001'),
+        ('missing_current_authorization', '请帮我退刚才那单', '演示订单编号', 'DEMO-1001'),
+        ('foreign_order', refund_request('DEMO-2001'), '未找到可操作的订单', 'DEMO-2001'),
+    ):
+        before = records(cursor, order)
+        turn = cli_turn(config, prompt, expected, session=success['session_id'])
+        assert not related_calls(turn) and records(cursor, order) == before
+        record({'case': case, **turn, 'policy_calls': 0, 'refund_write_calls': 0, 'database': before})
+    assert records(cursor, 'DEMO-1001') == (stored, refunds)
+
+    for order, reason, expected in (
+        ('DEMO-1002', RefundReason.UNPAID, '未支付'), ('DEMO-1004', RefundReason.SHIPPED, '已发货'),
+    ):
+        inquiry = cli_turn(config, f'能否退款 {order}', expected)
+        preflight = cli_turn(config, refund_request(order), expected)
+        assert '按办理规则' in inquiry['reply'] and '退款办理已拒绝' in preflight['reply']
+        for turn in (inquiry, preflight):
+            assert '暂时无法核实退款政策' in turn['reply'] and '依据：《' not in turn['reply']
+            assert [e['status'] for e in related_calls(turn) if e['event'] == 'mcp_search_policy'] == [PolicySearchStatus.FAILED]
+        [result] = [e['result'] for e in preflight['events'] if e['event'] == 'refund_result']
+        assert result['status'] == RefundOutcome.DENIED and result['reason'] == reason
+        assert not any(submit_calls(log, turn['trace_id']) for turn in (inquiry, preflight))
+        assert records(cursor, order) == ((), ())
+        direct = asyncio.run(direct_submission(config, order, seed_dispatch(cursor, order)))
+        assert direct['status'] == RefundOutcome.DENIED and direct['reason'] == reason and not records(cursor, order)[1]
+        record({'case': 'same_facts', 'inquiry': inquiry, 'preflight': preflight, 'transaction': direct,
+                'order': order, 'refund_rows': 0})
+
+    consultation = cli_turn(config, '退款多久能到账？', '暂时无法核实退款政策')
+    assert [e['status'] for e in related_calls(consultation)] == [PolicySearchStatus.FAILED]
+    assert '依据：《' not in consultation['reply']
+    record({'case': 'cold_policy_unavailable', **consultation, 'mcp': related_calls(consultation)})
+
+    check_transaction_denial(config, cursor, log, record)
+    record(check_server(config, cursor))
+
+
+def check_explicit_policy(config, cursor, log, record, policy_version, *, smoke=False):
+    reference_order, mixed_order, fault_order, empty_order = ('DEMO-1041', 'DEMO-1042', 'DEMO-1043', 'DEMO-1044')
+    for order in (reference_order, mixed_order, fault_order, empty_order):
+        seed_order(cursor, order)
+
+    def check(case, prompt, order, expected, *, session=None, mode=None, sends=0, cite=False, intent_calls=1):
+        old_dispatches, old_refunds = records(cursor, order)
+        turn = cli_turn(config, prompt, expected, session=session)
+        trace = turn['trace_id']
+        server = mcp_events(log)
+        related = [e for e in server if e.get('trace_id') == trace]
+        searches = [e for e in related if e['event'] == 'mcp_search_policy']
+        writes = submit_calls(log, trace)
+        assert len(writes) == sends
+        dispatches, refunds = records(cursor, order)
+        assert len(dispatches) - len(old_dispatches) == len(refunds) - len(old_refunds) == sends
+        assert sum(e['event'] == 'order_id_extraction' for e in turn['events']) == intent_calls
+        assert sum(e['event'] == 'intent' for e in turn['events']) == 1
+        if mode is None:
+            assert not searches
+        else:
+            assert 1 <= len(searches) <= 2 and searches[0]['mode'] == mode
+            if len(searches) == 2:
+                assert searches[1]['mode'] == 'formal'
+                assert searches[1]['requested_catalog_revision'] == searches[0]['catalog_revision']
+        retrievals = [e for e in server if e['event'] == 'policy_retrieval'
+                      and e['policy_event_id'] in {search['policy_event_id'] for search in searches}]
+        if sends:
+            refund_id, amount, key = refunds[-1]
+            assert amount == 19900 and refund_id in turn['reply'] and '¥199.00' in turn['reply']
+            assert key == writes[0]['idempotency_key'] and writes[0]['pid'] != turn['events'][0]['pid']
+            assert all(related.index(writes[0]) < related.index(search) for search in searches)
+        if cite:
+            [evidence] = [e['evidence'] for e in turn['events']
+                          if e['event'] == 'policy_evidence' and e['evidence']['status'] == 'sufficient']
+            if mode == 'formal':
+                citation = assert_exact_policy_citation(evidence, retrievals, policy_version)
+                assert citation['excerpt'] in turn['reply'] and order not in evidence['query']
+            else:
+                [citation] = evidence['citations']
+                [retrieval] = [e for e in retrievals if e['policy_event_id'] == citation['event_id']]
+                assert evidence['catalog_revision'] == retrieval['catalog_revision']
+                assert any(all(item[key] == citation[key] for key in ('document_id', 'clause_id', 'version', 'entry_type'))
+                           and item['text'] == citation['excerpt'] for item in retrieval['ranked'])
+            assert f"{policy_version} 版 {citation['clause_id']}" in turn['reply']
+        record({'case': case, **turn, 'mcp': related, 'policy_retrieval': retrievals,
+                'refund_writes': len(writes), 'new_refunds': sends})
+        return turn['session_id']
+
+    if not smoke:
+        check('general_policy', '退款多久能到账？', reference_order, 'FAQ-004', mode='consultation', cite=True)
+        check('order_policy', f'{reference_order} 适用哪条退款政策？', reference_order, '符合整单原路退款条件',
+              mode='formal', cite=True)
+        pending = check('eligibility_missing_order', '这笔订单可以退款吗？', reference_order, '提供要咨询资格')
+        check('eligibility_number_only', reference_order, reference_order, '本轮仅解释资格', session=pending, intent_calls=0)
+        check('submit_and_policy', f'帮我退 {mixed_order}，顺便告诉我依据。', mixed_order, '模拟退款成功',
+              mode='formal', sends=1, cite=True, intent_calls=0)
+    session = check('wait_for_policy', f'我想看完条款再决定是否退 {reference_order}。', reference_order, '本轮未提交退款',
+                    mode='formal', cite=True)
+    check('specific_policy_term', f'先给我看 {reference_order} 模拟退款到账时限的正式条款，我看完再决定是否退款。',
+          reference_order, 'RF-008', mode='formal', cite=True)
+    if not smoke:
+        check('requires_policy', f'如果查得到适用的正式条款就帮我退 {reference_order}。', reference_order, '本轮未提交退款',
+              mode='formal', session=session, cite=True)
+        marker = config.parent / 'policy-fault'
+        try:
+            marker.write_text('empty', encoding='ascii')
+            check('required_policy_missing', f'如果查得到适用的正式条款就帮我退 {empty_order}。', empty_order,
+                  '暂时无法核实退款政策', mode='formal')
+            marker.write_text('rerank', encoding='ascii')
+            check('submit_and_policy_unavailable', f'帮我退 {fault_order}。另请问适用哪条政策？', fault_order,
+                  '暂时无法核实退款政策', mode='formal', sends=1, intent_calls=0)
+        finally:
+            marker.unlink(missing_ok=True)
+    for case, prompt in (('missing_authorization_order', '帮我退'), ('historical_order', '退刚才那单')):
+        check(case, prompt, reference_order, '演示订单编号', session=session, intent_calls=0)
+    check('later_explicit_authorization', refund_request(reference_order), reference_order, '模拟退款成功',
+          session=session, sends=1, intent_calls=0)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--evidence', required=True, type=Path)
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--group', choices=(
-        'all', 'business', 'amount', 'safety', 'outcomes', 'policy-handling', POLICY_CONDITIONS_GROUP,
+        'all', 'business', 'amount', 'safety', 'outcomes', 'qualification', 'policy-handling', POLICY_CONDITIONS_GROUP,
+        EXPLICIT_POLICY_GROUP,
     ), default='all')
     parser.add_argument('--investigation-probe', action='store_true')
     args = parser.parse_args()
-    if args.investigation_probe and args.group not in ('safety', 'outcomes'):
-        parser.error('--investigation-probe requires the safety or outcomes group')
+    if args.investigation_probe and args.group not in ('safety', 'outcomes', 'qualification'):
+        parser.error('--investigation-probe requires the safety, outcomes or qualification group')
+    business_only = args.group in ('qualification', 'outcomes')
     use_config(args.config)
     settings = json.loads(args.config.read_text(encoding='utf-8'))
     namespace = 'order_demo_r07_' + uuid4().hex[:12]
+    mysql_options = connection_config()
+    utc_sql = mysql_options.pop('init_command')
     with tempfile.TemporaryDirectory(prefix='issue07-test-') as folder, pymysql.connect(
-        autocommit=True, **connection_config(),
+        autocommit=True, **mysql_options,
     ) as db, db.cursor() as cursor, args.evidence.open('w', encoding='utf-8') as evidence:
         def record(result):
             evidence.write(json.dumps(result, ensure_ascii=False) + '\n')
@@ -925,7 +1053,7 @@ def main():
         cursor.execute('SELECT VERSION()')
         mysql_version = cursor.fetchone()[0]
         print(f'SELECT VERSION(): {mysql_version}', flush=True)
-        assert mysql_version == '8.0.46'
+        cursor.execute(utc_sql)
         path = Path(folder)
         events = path / 'policy-events'
         events.mkdir()
@@ -938,43 +1066,75 @@ def main():
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
         settings['mysql']['database'] = namespace
-        settings['policy'].update(catalog_database=namespace, milvus_collection=namespace)
+        if business_only:
+            settings.pop('policy', None)
+        else:
+            settings['policy'].update(catalog_database=namespace, milvus_collection=namespace)
         settings['mcp'] = {'url': f'http://127.0.0.1:{port}/mcp', 'port': port,
                            'read_token': secrets.token_urlsafe(40), 'write_token': secrets.token_urlsafe(40)}
         settings['refund_policy_events_dir'] = str(events)
         config.write_text(json.dumps(settings), encoding='utf-8')
         isolated_settings = load_config(config)
-        backend = PolicyBackend(isolated_settings)
+        backend = None if business_only else PolicyBackend(isolated_settings)
         try:
             application('manage', config, 'init')
             application('manage', config, 'seed')
             application('cli', config, '--init-checkpoints')
             db.select_db(namespace)
-            record({'case': 'versions', 'mysql': mysql_version, 'milvus': backend.client.get_server_version(),
+            record({'case': 'versions', 'mysql': mysql_version,
+                    'milvus': backend.client.get_server_version() if backend else None,
                     'python': sys.version.split()[0], 'mcp': version('mcp'), 'deepagents': version('deepagents'),
                     'langgraph': version('langgraph'), 'isolated_namespace': namespace,
                     'model': isolated_settings.qwen.model, 'investigation_probe': args.investigation_probe})
             renumbered = args.group in ('policy-handling', POLICY_CONDITIONS_GROUP)
-            source, policy_version = SOURCE_PATH, DemoPolicy.BASELINE_VERSION
+            source, policy_version = CUTOVER_SOURCE, CUTOVER_VERSION
             if renumbered:
                 original = SOURCE_PATH.read_text(encoding='utf-8')
                 baseline = next(item.text.split('\n', 1)[1] for item in parse_policy(original) if item.clause_id == 'RF-003')
                 source, policy_version = path / 'renumbered-policy.md', '2.0'
                 source.write_text(original.replace('版本：1.0', '版本：2.0').replace('RF-003', RENAMED_CLAUSE)
                                   .replace(baseline.split('。', 1)[0] + '。', RENAMED_TEXT), encoding='utf-8')
-            published = cli_publish(config, source, policy_version)
-            assert published['catalog_revision'] == 1
-            record({'case': 'policy_published', 'receipt': published})
+            if backend is not None:
+                if args.group == 'all':
+                    baseline = cli_publish(config, SOURCE_PATH, DemoPolicy.BASELINE_VERSION)
+                    assert baseline['catalog_revision'] == 1
+                    record({'case': 'baseline_policy_published', 'receipt': baseline})
+                published = cli_publish(config, source, policy_version)
+                assert published['catalog_revision'] == (2 if args.group == 'all' else 1)
+                record({'case': 'policy_published', 'receipt': published})
+                if args.group == 'all':
+                    engine = create_mysql_engine(isolated_settings.mysql)
+                    try:
+                        catalog = MySQLPolicyCatalog(engine)
+                        for revision, original, expected_version in (
+                            (1, SOURCE_PATH, DemoPolicy.BASELINE_VERSION), (2, source, policy_version),
+                        ):
+                            document = read_policy_document(original.read_text(encoding='utf-8'), version=expected_version)
+                            snapshot = catalog.snapshot(None if revision == 2 else revision)
+                            assert snapshot.revision == revision and snapshot.versions == [document.target]
+                            assert sorted(backend.read_version(document.target), key=lambda e: e.clause_id) == sorted(
+                                document.entries, key=lambda e: e.clause_id,
+                            )
+                            record({'case': 'policy_snapshot', 'snapshot': snapshot.model_dump(),
+                                    'source_digest': document.source_digest, 'entries': len(document.entries),
+                                    'rf_013': next(e.text for e in document.entries if e.clause_id == 'RF-013')})
+                    finally:
+                        engine.dispose()
             with mcp_process(config, port) as log:
+                if args.group == EXPLICIT_POLICY_GROUP:
+                    check_explicit_policy(config, cursor, log, record, policy_version, smoke=args.smoke)
                 if args.group == POLICY_CONDITIONS_GROUP:
                     record(check_omitted_shipping(config, cursor, log, events))
-                    record(check_complete_conditions(config, cursor, log, events))
+                if args.group == 'qualification':
+                    check_qualification(config, cursor, log, record, events)
                 if args.group in ('all', 'business', 'policy-handling'):
-                    record(check_success(config, cursor, log, events, renumbered=renumbered))
+                    record(check_success(config, cursor, log, events))
                     if not renumbered and not args.smoke:
                         record(check_server(config, cursor))
                     if renumbered or not args.smoke:
                         check_business(config, cursor, log, record, version=policy_version)
+                    if args.group == 'policy-handling' or (args.group == 'all' and not args.smoke):
+                        check_transaction_denial(config, cursor, log, record, policy_version=policy_version)
                 if not args.smoke and args.group in ('all', 'business', 'amount'):
                     check_amount(config, cursor, log, record)
                 if not args.smoke and args.group in ('all', 'safety', 'policy-handling'):
@@ -987,15 +1147,18 @@ def main():
                     check_host_competition(config, cursor, log, record)
         finally:
             try:
-                if backend.client.has_collection(namespace):
-                    backend.client.drop_collection(namespace)
-                assert not backend.client.has_collection(namespace)
+                if backend is not None:
+                    if backend.client.has_collection(namespace):
+                        backend.client.drop_collection(namespace)
+                    assert not backend.client.has_collection(namespace)
             finally:
-                backend.close()
+                if backend is not None:
+                    backend.close()
                 cursor.execute(f'DROP DATABASE IF EXISTS `{namespace}`')
                 cursor.execute('SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=%s', (namespace,))
                 assert cursor.fetchone() == (0,)
-                record({'case': 'cleanup', 'mysql_database_removed': True, 'milvus_collection_removed': True})
+                record({'case': 'cleanup', 'mysql_database_removed': True,
+                        'milvus_collection_removed': backend is not None})
 
 
 if __name__ == '__main__':

@@ -6,11 +6,12 @@ import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from implementations.refund.investigation import investigate_order
-from model.refund.flow import ExchangeMessage, InvestigationStep, OrderToolEvent, OrderTurn
+from model.refund.flow import ExchangeMessage, InvestigationStep, OrderState, OrderToolEvent, OrderTurn
+from model.refund.intent import IntentDecision
 from workflows.refund import build_graph, load_refund_state, run_refund_turn
 from model.orders.query import GetOrderRequest, OrderQueryResult
 from model.refund.status import ConversationIntent, OrderGoal, ReplanAction
@@ -45,8 +46,9 @@ def unexpected_policy_search(*_args):
 ])
 def test_graph_rejects_invalid_plan_before_dispatch(plan):
     def decide(schema, _prompt):
-        if schema.__name__ == "ConversationDecision":
-            return schema(intent="order_question", order_id="DEMO-1001")
+        if schema is IntentDecision:
+            return schema(intent="order_question", order_id="DEMO-1001", order_goal="status", order_id_status="extracted",
+                          order_id_evidence="DEMO-1001", continues_eligibility_question=False)
         return schema.model_validate({"steps": plan})
 
     def execute(_step, _trace_id):
@@ -54,7 +56,7 @@ def test_graph_rejects_invalid_plan_before_dispatch(plan):
 
     graph = build_graph(decide, execute, lambda *_args, **_fields: None, search=unexpected_policy_search)
     state = graph.invoke({"history": [{"role": "user", "content": "查一下 DEMO-1001"}],
-                          "trace_id": "test"})
+                          "trace_id": "test", "refund_source": None})
     assert state["reply"] == "本轮未能完成订单查询，请稍后再试。"
 
 
@@ -68,8 +70,9 @@ def test_graph_rejects_invalid_plan_before_dispatch(plan):
 ])
 def test_plain_order_query_finishes_without_another_model_call(result_data, action, reply):
     def decide(schema, _prompt):
-        if schema.__name__ == "ConversationDecision":
-            return schema(intent="order_question", order_id="DEMO-1001")
+        if schema is IntentDecision:
+            return schema(intent="order_question", order_id="DEMO-1001", order_goal="status", order_id_status="extracted",
+                          order_id_evidence="DEMO-1001", continues_eligibility_question=False)
         if schema.__name__ == "InvestigationPlan":
             return schema(steps=[InvestigationStep(
                 step_id="order", kind="inspect_order", order_id="DEMO-1001",
@@ -85,13 +88,13 @@ def test_plain_order_query_finishes_without_another_model_call(result_data, acti
     graph = build_graph(decide, investigate, lambda name, **fields: events.append((name, fields)),
                         search=unexpected_policy_search)
     state = graph.invoke({"history": [{"role": "user", "content": "查一下 DEMO-1001"}],
-                          "trace_id": "test"})
+                          "trace_id": "test", "refund_source": None})
     assert state["reply"] == reply
     assert state["replan_decision"]["action"] == action
     assert [fields["decision"] for name, fields in events if name == "replan"] == [state["replan_decision"]]
 
 
-def test_typed_graph_continues_legacy_checkpoint_without_losing_partial_updates():
+def test_typed_graph_continues_checkpoint_without_losing_partial_updates():
     def decide(*_):
         pytest.fail("补充订单号时不应再次分类")
 
@@ -105,29 +108,29 @@ def test_typed_graph_continues_legacy_checkpoint_without_losing_partial_updates(
     session = "old-conversation"
     config = {"configurable": {"thread_id": session}}
     previous = [{"role": "user", "content": "能退吗"}, {"role": "assistant", "content": "请提供订单号"}]
-    legacy_order = {"status": "found", "order": {
+    order_result = {"status": "found", "order": {
         "order_id": "DEMO-1003", "payment_status": "paid", "shipping_status": "unshipped",
-        "refund_status": "refunded", "paid_amount_fen": 8800, "currency": "CNY",
+        "refund_status": "refunded", "paid_amount_fen": 8800,
     }}
-    graph.update_state(config, {"history": previous, "trace_id": "old-turn", "eligibility_question": "能退吗",
+    graph.update_state(config, {"history": previous, "trace_id": "old-turn", "refund_source": None,
+                                "eligibility_question": "能退吗",
                                 "decision": {"intent": "order_question", "order_id": None, "order_goal": "eligibility"},
-                                "reply": "请提供订单号", "order_result": legacy_order,
+                                "reply": "请提供订单号", "order_result": order_result,
                                 "event": {"event_id": "old-event", "trace_id": "old-turn",
                                           "model_tool_call_id": "old-call", "order_id": "DEMO-1003",
-                                          "result": legacy_order},
+                                          "result": order_result},
                                 "observation": {"step_id": "old-order", "status": "completed",
-                                                "tool_event_id": "old-event", "order_result": legacy_order},
+                                                "tool_event_id": "old-event", "order_result": order_result},
                                 "refund_result": {"status": "already_refunded", "refund": {
                                     "order_id": "DEMO-1003", "refund_id": "MOCK-RF-1003",
-                                    "amount_fen": 8800, "currency": "CNY",
+                                    "amount_fen": 8800,
                                 }}}, as_node="refund_reply")
     snapshot, _ = load_refund_state(graph, session)
     assert snapshot is not None
     assert snapshot.history[0].content == "能退吗"
     assert snapshot.decision is not None and snapshot.decision.order_goal == "eligibility"
     saved = snapshot.model_dump(mode="json")
-    order = dict(legacy_order["order"])
-    del order["currency"]
+    order = order_result["order"]
     assert saved["event"]["result"]["order"] == order
     assert saved["observation"]["order_result"]["order"] == order
     assert saved["order_result"]["order"] == order
@@ -136,7 +139,7 @@ def test_typed_graph_continues_legacy_checkpoint_without_losing_partial_updates(
     }
 
     turn = OrderTurn(history=[*snapshot.history, ExchangeMessage(role="user", content="DEMO-1001")],
-                     trace_id="new-turn")
+                     trace_id="new-turn", refund_source=None)
     result = run_refund_turn(graph, session, turn)
     raw = graph.get_state(config).values
     assert result.question == "能退吗"
@@ -146,6 +149,23 @@ def test_typed_graph_continues_legacy_checkpoint_without_losing_partial_updates(
     assert result.reply == "未找到可操作的订单。"
     assert type(raw["order_result"]["status"]) is str
     assert raw["order_result"]["status"] == "unavailable"
+
+
+def test_refund_checkpoint_rejects_removed_currency():
+    with pytest.raises(ValidationError) as caught:
+        OrderState.model_validate({"history": [], "trace_id": "trace", "refund_source": None, "order_result": {
+            "status": "found", "order": {
+                "order_id": "DEMO-1003", "payment_status": "paid", "shipping_status": "unshipped",
+                "refund_status": "refunded", "paid_amount_fen": 8800, "currency": "CNY",
+            },
+        }})
+    assert any(error["type"] == "extra_forbidden" and error["loc"][-1] == "currency"
+               for error in caught.value.errors())
+
+
+def test_refund_checkpoint_requires_explicit_turn_source():
+    with pytest.raises(ValidationError, match="refund_source"):
+        OrderState.model_validate({"history": [], "trace_id": "checkpoint"})
 
 
 class ScriptedModel(FakeMessagesListChatModel):

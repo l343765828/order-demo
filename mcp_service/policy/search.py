@@ -47,7 +47,8 @@ def search_policy(
     except Exception:
 
         # region 检索发生异常时返回失败状态和空候选
-        return PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=event_id, candidates=[])
+        return PolicySearchResult(status=PolicySearchStatus.FAILED, event_id=event_id,
+                                  candidates=[], catalog_revision=None)
         # endregion
 
     # endregion

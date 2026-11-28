@@ -158,11 +158,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
         # region 读取 JSON 并构造配置对象
         data = json.loads(source.read_text(encoding="utf-8"))
-        qwen = {**data["qwen"]}
-        # 忽略历史密钥，Qwen 客户端沿用免鉴权协议。
-        qwen.pop("api_key", None)
         config = AppConfig(mysql=MySQLConfig(**data["mysql"]), mcp=MCPConfig(**data["mcp"]),
-                           qwen=QwenConfig.model_validate(qwen),
+                           qwen=QwenConfig.model_validate(data["qwen"]),
                            policy=PolicyConfig(**data["policy"]) if "policy" in data else None,
                            embedding=EmbeddingConfig.model_validate(data["embedding"]) if "embedding" in data else None,
                            reranker=RerankerConfig.model_validate(data["reranker"]) if "reranker" in data else None,

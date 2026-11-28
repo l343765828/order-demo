@@ -1,0 +1,98 @@
+{
+  "first_attempt": {
+    "version": "current",
+    "revision": "c4e213e130b868500283a1e8a87eba2710eadb96+astra-42fb105d5718b85718b3049617b47bebeba6307d5cbe871872e8b3f602fdf116+final-prompt",
+    "source_sha256": "832e50e8d61806698f3b44495f8e0f49ff8412f34646ce9ce4a656ffd770cfe5",
+    "sample_counts": {
+      "missing": 1
+    },
+    "order_id_matches_by_category": {
+      "missing": 0
+    },
+    "counts": {
+      "accepted_plan_with_order": 1,
+      "fabricated": 1,
+      "historical_reuse": 1,
+      "http_non_success": 0,
+      "missing_n": 1,
+      "node_failures": 0,
+      "plan_with_order": 1,
+      "raw_intent_parseable": 1,
+      "raw_status_correct": 0,
+      "raw_status_n": 1,
+      "read_only_missing_n": 1
+    },
+    "errors_by_id": {
+      "F121": [
+        "fabricated",
+        "historical_reuse"
+      ]
+    },
+    "raw_plan_disagreements": {},
+    "workflow_latency": {
+      "n": 1,
+      "p95_ms": 19222.799,
+      "p99_ms": 19222.799
+    },
+    "intent_http_latency": {
+      "n": 1,
+      "p95_ms": 14205.513,
+      "p99_ms": 14205.513
+    },
+    "total_call_distribution": {
+      "2": 1
+    },
+    "intent_call_distribution": {
+      "1": 1
+    },
+    "ordinary_intent_call_distribution": {
+      "1": 1
+    }
+  },
+  "after_retry": {
+    "version": "current",
+    "revision": "c4e213e130b868500283a1e8a87eba2710eadb96+astra-42fb105d5718b85718b3049617b47bebeba6307d5cbe871872e8b3f602fdf116+final-prompt",
+    "source_sha256": "832e50e8d61806698f3b44495f8e0f49ff8412f34646ce9ce4a656ffd770cfe5",
+    "sample_counts": {
+      "missing": 1
+    },
+    "order_id_matches_by_category": {
+      "missing": 0
+    },
+    "counts": {
+      "accepted_plan_with_order": 1,
+      "fabricated": 1,
+      "historical_reuse": 1,
+      "http_non_success": 0,
+      "missing_n": 1,
+      "node_failures": 0,
+      "plan_with_order": 1,
+      "raw_intent_parseable": 1,
+      "raw_status_correct": 0,
+      "raw_status_n": 1,
+      "read_only_missing_n": 1
+    },
+    "errors_by_id": {
+      "F121": [
+        "fabricated",
+        "historical_reuse"
+      ]
+    },
+    "raw_plan_disagreements": {},
+    "total_call_distribution": {
+      "2": 1
+    },
+    "intent_call_distribution": {
+      "1": 1
+    },
+    "ordinary_intent_call_distribution": {
+      "1": 1
+    }
+  },
+  "retry": {
+    "first_attempt_timeouts": 0,
+    "recovered": 0,
+    "remaining_timeouts": 0,
+    "model_requests": 0
+  }
+}

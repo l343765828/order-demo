@@ -17,13 +17,15 @@ import manage
 from config import load_config
 from config.limits import PolicyCatalogTables
 from implementations.policy.catalog import initialize_policy_catalog
-from launch_with_config import application_command
+from model.refund.status import DispatchStatus
 from order_mysql_fixture import isolated_order_database
 from utils.database import create_mysql_engine
+from verify_checkpoint_mysql import config as checkpoint_config, graph as checkpoint_graph
+from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 
 
 def run_manage(config, command):
-    result = subprocess.run(application_command('manage', config, command),
+    result = subprocess.run([sys.executable, str(PROJECT_DIR / 'manage.py'), '--config', str(config), command],
                             capture_output=True, text=True, encoding='utf-8', timeout=30)
     assert result.returncode == 0, f'manage {command} exited {result.returncode}'
     assert result.stdout.strip() == f'{command} completed'
@@ -117,7 +119,6 @@ def check_seed(config, cursor):
 
 def check_initialization(config, cursor):
     orders = rows(cursor, 'orders')
-    cursor.execute('ALTER TABLE refund_dispatches DROP FOREIGN KEY fk_dispatch_refund')
     for _ in range(2):
         run_manage(config, 'init')
         cursor.execute(
@@ -132,7 +133,7 @@ def check_initialization(config, cursor):
     initialize_policy_catalog(mysql.database, mysql)
     cursor.execute(f'SELECT revision FROM {PolicyCatalogTables.HEAD}')
     assert cursor.fetchone() == (2,)
-    print('管理入口可重复建表与补齐退款外键，政策目录初始化保留既有目录头', flush=True)
+    print('管理入口可重复初始化，退款外键和政策目录头仍有效', flush=True)
 
 
 def check_constraints(cursor):
@@ -201,6 +202,47 @@ finally:
     print('两个独立进程的 Core 连接池通过顺序释放和继续读取验证', flush=True)
 
 
+def check_reset(config, cursor):
+    saver = PyMySQLSaver(cursor.connection)
+    saver.setup()
+    app = checkpoint_graph(saver)
+    app.invoke({'value': 'old', 'observation': ''}, checkpoint_config('old-thread'))
+    cursor.execute("INSERT INTO conversation_summaries VALUES ('s',1,1,'摘要','old-event',UTC_TIMESTAMP(6))")
+    cursor.execute("INSERT INTO consumer_preferences VALUES ('u','response_detail','brief',UTC_TIMESTAMP(6))")
+    cursor.execute("UPDATE refund_dispatches SET status='succeeded', refund_id='r1' WHERE idempotency_key='d2'")
+    cursor.execute("UPDATE refund_dispatches SET status=%s WHERE idempotency_key='other'",
+                   (DispatchStatus.UNCONFIRMED.value,))
+    cursor.execute(
+        "INSERT INTO refund_dispatches (idempotency_key,order_id,session_id,source_message_sequence,status,trace_id,"
+        "created_at,updated_at) VALUES ('old-pending','DEMO-1002','s',1,%s,'old',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))",
+        (DispatchStatus.PENDING.value,),
+    )
+    cursor.execute("CREATE TABLE other_demo_sentinel (item VARCHAR(32) PRIMARY KEY)")
+    cursor.execute("INSERT INTO other_demo_sentinel VALUES ('keep')")
+    cursor.execute(
+        f"INSERT INTO {PolicyCatalogTables.RELEASES} VALUES "
+        "('reset-test-policy','1.0',%s,'test','unchanged','finished',2,UTC_TIMESTAMP(6))",
+        ('0' * 64,),
+    )
+
+    cleared = ('conversation_sessions', 'conversation_messages', 'conversation_summaries',
+               'consumer_preferences', 'refund_dispatches', 'checkpoints', 'checkpoint_blobs', 'checkpoint_writes')
+    retained = (PolicyCatalogTables.HEAD, PolicyCatalogTables.RELEASES, 'checkpoint_migrations', 'other_demo_sentinel')
+    before = {table: rows(cursor, table) for table in retained}
+    assert all(rows(cursor, table) for table in cleared)
+    cursor.execute("SELECT DISTINCT status FROM refund_dispatches")
+    assert {DispatchStatus(status) for status, in cursor.fetchall()} == set(DispatchStatus)
+    for _ in range(2):
+        run_manage(config, 'reset')
+        assert all(not rows(cursor, table) for table in cleared)
+        assert [row[0] for row in rows(cursor, 'orders')] == [
+            'DEMO-1001', 'DEMO-1002', 'DEMO-1003', 'DEMO-1004', 'DEMO-2001',
+        ]
+        assert [row[:5] for row in rows(cursor, 'refunds')] == [('MOCK-RF-1003', 'DEMO-1003', None, 8800, 'seed')]
+        assert {table: rows(cursor, table) for table in retained} == before
+    print('重置清空会话、偏好、已决及未决提交和检查点，恢复种子并保留政策目录与其他演示哨兵', flush=True)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, help='授权的验收配置 JSON')
@@ -209,3 +251,4 @@ if __name__ == '__main__':
         check_initialization(config, cursor)
         check_constraints(cursor)
         check_worker_pools(config)
+        check_reset(config, cursor)

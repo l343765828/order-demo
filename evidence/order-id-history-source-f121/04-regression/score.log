@@ -1,0 +1,146 @@
+{
+  "first_attempt": {
+    "version": "current",
+    "revision": "c4e213e130b868500283a1e8a87eba2710eadb96+astra-42fb105d5718b85718b3049617b47bebeba6307d5cbe871872e8b3f602fdf116+final-prompt",
+    "source_sha256": "cba06f29c56dfc0cb149bbb538d114d67f12b37646a397233d372bfc63013cd8",
+    "sample_counts": {
+      "normal": 1,
+      "missing": 6,
+      "boundary": 1,
+      "injection": 2,
+      "refund": 1
+    },
+    "order_id_matches_by_category": {
+      "normal": 1,
+      "missing": 3,
+      "boundary": 1,
+      "injection": 2,
+      "refund": 1
+    },
+    "counts": {
+      "accepted_plan_with_order": 4,
+      "exact_correct": 1,
+      "exact_n": 1,
+      "fabricated": 3,
+      "historical_reuse": 3,
+      "http_non_success": 1,
+      "missing_n": 10,
+      "missing_prompt": 6,
+      "missing_stopped": 7,
+      "node_failures": 1,
+      "plan_with_order": 4,
+      "raw_exact_correct": 1,
+      "raw_exact_n": 1,
+      "raw_intent_parseable": 10,
+      "raw_status_correct": 7,
+      "raw_status_n": 11,
+      "read_only_missing_n": 9,
+      "read_only_missing_without_order": 6
+    },
+    "errors_by_id": {
+      "F123": [
+        "fabricated",
+        "historical_reuse"
+      ],
+      "F124": [
+        "fabricated",
+        "historical_reuse"
+      ],
+      "F126": [
+        "fabricated",
+        "historical_reuse"
+      ]
+    },
+    "raw_plan_disagreements": {},
+    "workflow_latency": {
+      "n": 11,
+      "p95_ms": 100343.951,
+      "p99_ms": 100343.951
+    },
+    "intent_http_latency": {
+      "n": 10,
+      "p95_ms": 72022.168,
+      "p99_ms": 72022.168
+    },
+    "total_call_distribution": {
+      "1": 7,
+      "2": 4
+    },
+    "intent_call_distribution": {
+      "1": 11
+    },
+    "ordinary_intent_call_distribution": {
+      "1": 11
+    }
+  },
+  "after_retry": {
+    "version": "current",
+    "revision": "c4e213e130b868500283a1e8a87eba2710eadb96+astra-42fb105d5718b85718b3049617b47bebeba6307d5cbe871872e8b3f602fdf116+final-prompt",
+    "source_sha256": "cba06f29c56dfc0cb149bbb538d114d67f12b37646a397233d372bfc63013cd8",
+    "sample_counts": {
+      "normal": 1,
+      "missing": 6,
+      "boundary": 1,
+      "injection": 2,
+      "refund": 1
+    },
+    "order_id_matches_by_category": {
+      "normal": 1,
+      "missing": 3,
+      "boundary": 1,
+      "injection": 2,
+      "refund": 1
+    },
+    "counts": {
+      "accepted_plan_with_order": 4,
+      "exact_correct": 1,
+      "exact_n": 1,
+      "fabricated": 3,
+      "historical_reuse": 3,
+      "http_non_success": 0,
+      "missing_n": 10,
+      "missing_prompt": 7,
+      "missing_stopped": 7,
+      "node_failures": 0,
+      "plan_with_order": 4,
+      "raw_exact_correct": 1,
+      "raw_exact_n": 1,
+      "raw_intent_parseable": 11,
+      "raw_status_correct": 8,
+      "raw_status_n": 11,
+      "read_only_missing_n": 9,
+      "read_only_missing_without_order": 6
+    },
+    "errors_by_id": {
+      "F123": [
+        "fabricated",
+        "historical_reuse"
+      ],
+      "F124": [
+        "fabricated",
+        "historical_reuse"
+      ],
+      "F126": [
+        "fabricated",
+        "historical_reuse"
+      ]
+    },
+    "raw_plan_disagreements": {},
+    "total_call_distribution": {
+      "1": 7,
+      "2": 4
+    },
+    "intent_call_distribution": {
+      "1": 11
+    },
+    "ordinary_intent_call_distribution": {
+      "1": 11
+    }
+  },
+  "retry": {
+    "first_attempt_timeouts": 1,
+    "recovered": 1,
+    "remaining_timeouts": 0,
+    "model_requests": 1
+  }
+}

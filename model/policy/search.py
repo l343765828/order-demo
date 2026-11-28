@@ -111,43 +111,33 @@ class PolicySearchResult(BaseModel):
     event_id: str = Field(min_length=1)
     # 按重排顺序返回的政策候选，检索失败或没有候选时为空列表。
     candidates: list[PolicyCandidate] = Field(max_length=PolicyLimits.MAX_RANKED_ENTRIES)
-    # 成功回执携带本次检索使用的修订号。旧 checkpoint 可缺少此字段。
-    catalog_revision: PolicyCatalogRevision | None = None
+    # 成功回执携带本次检索使用的修订号，失败回执为 None。
+    catalog_revision: PolicyCatalogRevision | None
 
-    # 将 SDK 接收的检索结果恢复为具名模型和业务枚举。
+    # 将 SDK 接收的结构化结果恢复为具名模型和业务枚举。
     @classmethod
     def from_mcp(cls, data: dict[str, Any]) -> Self:
 
-        # region 校验 MCP 回执，成功结果必须携带可用于补查的修订号
-        result = cls.model_validate(data)
-        if (
-            # 本次检索已成功完成，候选列表可能为空。
-            result.status is PolicySearchStatus.OK
-            # 服务端未返回本轮所用的目录修订号。
-            and result.catalog_revision is None
-        ):
-            raise ValueError('成功检索缺少目录修订号')
-        return result
+        # region 按当前回执契约解析 MCP 结果
+        return cls.model_validate(data)
         # endregion
 
-    # 检索失败时禁止将候选误认为可靠结果。
+    # 成功检索必须固定修订，失败检索不得携带候选或修订。
     @model_validator(mode='after')
-    def check_failure(self):
+    def check_result(self) -> Self:
 
-        # region 检索失败时只允许空候选列表
-        if (
-            # 政策检索服务报告本轮失败。
-            self.status is PolicySearchStatus.FAILED
-            # 失败回执仍携带候选或可能被视为已固定的目录修订号。
-            and (
-                # 失败回执仍携带了可能被当作有效结果的政策候选。
-                self.candidates
-                # 失败回执仍声明了目录修订号。
-                or self.catalog_revision is not None
-            )
-        ):
-            raise ValueError('检索失败不得返回候选或目录修订号')
+        # region 校验成功和失败回执分别允许携带的字段
+        match self.status:
+
+            # region 成功检索缺少目录修订时拒绝回执
+            case PolicySearchStatus.OK if self.catalog_revision is None:
+                raise ValueError('成功检索缺少目录修订号')
+            # endregion
+
+            # region 失败检索携带候选或目录修订时拒绝回执
+            case PolicySearchStatus.FAILED if self.candidates or self.catalog_revision is not None:
+                raise ValueError('检索失败不得返回候选或目录修订号')
+            # endregion
+
         return self
         # endregion
-
-# 接口调用者负责确保办理任务始终使用 formal；模型不得自行放宽范围。

@@ -166,7 +166,7 @@ class PolicyPublicationSession:
         # endregion
 
     # 在校验通过后串行分配修订，原子登记版本首次生效及目录头推进。
-    def activate(self, expected_version: str | None, *, adoption: PolicyPublicationApproval | None = None) -> int:
+    def activate(self, expected_version: str | None) -> int:
 
         # region 锁住目录头并核对验证期间该文档的生效版本
         with self._transaction() as connection:
@@ -178,16 +178,8 @@ class PolicyPublicationSession:
                 raise PublicationConflict('该文档的生效版本已被并发发布改变')
                 # endregion
 
-            # region 登记可直接沿用的演示基线并原子切换目录
+            # region 为写入完成的版本分配修订并原子推进目录
             revision = head.revision + 1
-            if adoption is not None:
-
-                # region 已验证的历史基线随切换一同登记原件和资格确认
-                policy_catalog_repository.record_attempt(
-                    connection, target=self.target, approval=adoption, write_state=PolicyWriteState.NOT_STARTED,
-                )
-                # endregion
-
             if not policy_catalog_repository.activate_release(connection, target=self.target, revision=revision):
 
                 # region 发布记录未满足生效条件时回滚切换

@@ -1,0 +1,86 @@
+{
+  "first_attempt": {
+    "version": "current",
+    "revision": "c4e213e130b868500283a1e8a87eba2710eadb96+astra-42fb105d5718b85718b3049617b47bebeba6307d5cbe871872e8b3f602fdf116+final-prompt",
+    "source_sha256": "581b71a516234318743a33abf1f4836b8ec4a122e66a451acd25d7fa878df265",
+    "sample_counts": {
+      "missing": 1
+    },
+    "order_id_matches_by_category": {
+      "missing": 1
+    },
+    "counts": {
+      "http_non_success": 0,
+      "missing_n": 1,
+      "missing_prompt": 1,
+      "missing_stopped": 1,
+      "node_failures": 0,
+      "raw_intent_parseable": 1,
+      "raw_status_correct": 1,
+      "raw_status_n": 1,
+      "read_only_missing_n": 1,
+      "read_only_missing_without_order": 1
+    },
+    "errors_by_id": {},
+    "raw_plan_disagreements": {},
+    "workflow_latency": {
+      "n": 1,
+      "p95_ms": 15826.653,
+      "p99_ms": 15826.653
+    },
+    "intent_http_latency": {
+      "n": 1,
+      "p95_ms": 15804.201,
+      "p99_ms": 15804.201
+    },
+    "total_call_distribution": {
+      "1": 1
+    },
+    "intent_call_distribution": {
+      "1": 1
+    },
+    "ordinary_intent_call_distribution": {
+      "1": 1
+    }
+  },
+  "after_retry": {
+    "version": "current",
+    "revision": "c4e213e130b868500283a1e8a87eba2710eadb96+astra-42fb105d5718b85718b3049617b47bebeba6307d5cbe871872e8b3f602fdf116+final-prompt",
+    "source_sha256": "581b71a516234318743a33abf1f4836b8ec4a122e66a451acd25d7fa878df265",
+    "sample_counts": {
+      "missing": 1
+    },
+    "order_id_matches_by_category": {
+      "missing": 1
+    },
+    "counts": {
+      "http_non_success": 0,
+      "missing_n": 1,
+      "missing_prompt": 1,
+      "missing_stopped": 1,
+      "node_failures": 0,
+      "raw_intent_parseable": 1,
+      "raw_status_correct": 1,
+      "raw_status_n": 1,
+      "read_only_missing_n": 1,
+      "read_only_missing_without_order": 1
+    },
+    "errors_by_id": {},
+    "raw_plan_disagreements": {},
+    "total_call_distribution": {
+      "1": 1
+    },
+    "intent_call_distribution": {
+      "1": 1
+    },
+    "ordinary_intent_call_distribution": {
+      "1": 1
+    }
+  },
+  "retry": {
+    "first_attempt_timeouts": 0,
+    "recovered": 0,
+    "remaining_timeouts": 0,
+    "model_requests": 0
+  }
+}

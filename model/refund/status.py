@@ -27,11 +27,37 @@ class OrderGoal(StrEnum):
     ELIGIBILITY = "eligibility"  # 结合订单事实和政策解释能否退款，本轮只做咨询。
 
 
+# 区分消费者索要依据和要求先确认条款的政策需求。
+class PolicyRequest(StrEnum):
+    # 消费者主动索要政策依据，可独立咨询或附在当轮办理指令后。
+    BASIS = "basis"
+    # 消费者要先看条款再决定，或将查到正式条款设为办理条件，本轮只调查。
+    BEFORE_REFUND = "before_refund"
+
+
+# 区分模型对本轮订单号提取的三种结果。
+class OrderIdExtractionStatus(StrEnum):
+    EXTRACTED = "extracted"  # 本轮消息明确指定唯一目标，保留编号的原样写法。
+    MISSING = "missing"  # 本轮未给出目标编号，仅指代历史订单也属于缺号。
+    AMBIGUOUS = "ambiguous"  # 本轮提到多个不同编号，无法确定唯一目标。
+
+
+# 标记本轮意图判断及其模型提取观测事件。
+class IntentEvent(StrEnum):
+    DECISION = "intent"  # 记录应用采用的意图和独立解析的偏好命令。
+    ORDER_ID_EXTRACTION = "order_id_extraction"  # 记录模型返回的原样编号、提取状态和原文依据。
+
+
 # 表示调查后继续、结束或失败。
 class ReplanAction(StrEnum):
     CONTINUE = "continue"  # 根据已有观察继续调查或补查政策。
     FINISH = "finish"  # 调查已得出结果，可以结束本轮。
     FAIL = "fail"  # 查询失败或证据不足，结束本轮并说明原因。
+
+
+# 标记调查完成一步后生成的结构化重规划决定。
+class InvestigationEvent(StrEnum):
+    REPLAN = "replan"  # 记录继续调查、结束或失败的原因。
 
 
 # 区分订单与政策调查步骤。
@@ -53,10 +79,11 @@ class ObservationStatus(StrEnum):
     FAILED = "failed"  # 工具查询失败，无法取得本步骤的业务结果。
 
 
-# 管理命令显式选择初始化或装载退款演示数据。
+# 管理命令显式选择初始化、装载或重置退款演示数据。
 class DemoDataCommand(StrEnum):
-    INIT = "init"  # 创建缺失的库、应用表和外键。
+    INIT = "init"  # 创建缺失的库及包含当前约束的应用表。
     SEED = "seed"  # 补齐演示订单和示例退款，保留现有业务记录。
+    RESET = "reset"  # 清空现有退款演示状态并重新装载种子。
 
 
 # 区分模拟退款执行及回执核对后的业务结果。
@@ -95,6 +122,31 @@ class RefundReason(StrEnum):
     EXECUTION_UNAVAILABLE = "execution_unavailable"  # 执行通道未配置或确认无法使用。
     DATABASE_FAILURE = "database_failure"  # 数据库明确没有提交退款。
     RECEIPT_UNKNOWN = "receipt_unknown"  # 暂时无法确认已尝试的业务结果。
+
+
+# 表示本人订单按可信状态得出的退款资格。
+class RefundQualification(StrEnum):
+    ELIGIBLE = "eligible"  # 已支付、未发货且无原退款，可以首次办理。
+    ALREADY_REFUNDED = RefundOutcome.ALREADY_REFUNDED.value  # 已有原退款，办理时优先返回原回执。
+    UNPAID = RefundReason.UNPAID.value  # 尚未支付，优先于发货状态说明拒绝。
+    SHIPPED = RefundReason.SHIPPED.value  # 已支付但已发货，不能首次办理。
+
+    # 将首次办理的状态拒绝转换为执行原因，其他资格结果由调用方分别处理。
+    @property
+    def denial_reason(self) -> RefundReason | None:
+
+        # region 将支付或发货拒绝转换为对应的办理回执原因
+        match self:
+            case RefundQualification.UNPAID:
+                return RefundReason.UNPAID
+            case RefundQualification.SHIPPED:
+                return RefundReason.SHIPPED
+            case _:
+
+                # region 原退款或合格结果由调用方各自处理
+                return None
+                # endregion
+        # endregion
 
 
 # 区分预置模拟退款与实际执行创建的记录。

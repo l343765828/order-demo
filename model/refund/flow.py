@@ -1,19 +1,22 @@
 """查单流程使用的结构化数据模型。"""
 
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BeforeValidator, Field, WithJsonSchema, model_validator
 
-from config.limits import LegacyCurrency, RefundLimits
+from config.limits import RefundLimits
 from model.base import StrictModel
 from model.orders.query import OrderQueryResult
 from model.policy.search import PolicyCatalogRevision, PolicySearchResult
 from model.policy.evidence import PolicyEvidence
 from model.base import status_schema
 from model.refund.preference import DetailValue, PreferenceCommand, PreferenceResult
-from model.refund.status import ConversationIntent, ConversationRole, InvestigationKind, ObservationStatus, OrderGoal, ReplanAction
-from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerification, RefundResult, RefundTurnSource
+from model.refund.status import (
+    ConversationIntent, ConversationRole, InvestigationKind, ObservationStatus, OrderGoal, PolicyRequest, ReplanAction,
+    RefundQualification,
+)
+from model.refund.submission import AuthorizedRefundIntent, PreparedRefund, RefundResult, RefundTurnSource
 
 
 # 定义退款业务流程使用的 LangGraph 节点标识。
@@ -27,20 +30,24 @@ class OrderFlowNode(StrEnum):
     EXECUTE = "execute"  # 执行当前调查步骤并取得工具结果。
     OBSERVE = "observe"  # 核对工具结果是否属于本轮和当前步骤。
     REPLAN = "replan"  # 根据已核对的结果继续调查或生成回复。
-    REVIEW_REFUND = "review_refund"  # 固定业务节点重查订单并持久保存最终核验依据。
+    REVIEW_REFUND = "review_refund"  # 固定业务节点重查订单并准备单次提交。
     SEND_REFUND = "send_refund"  # 固定业务节点持久保存提交并受控发送一次。
     REFUND_REPLY = "refund_reply"  # 将可信退款结果填入消费者回复。
 
 
-# 标识兼容历史币种时读取的退款检查点通道和嵌套字段。
-class RefundCheckpointField(StrEnum):
-    EVENT = "event"  # 调查步骤产生的工具事件。
-    RESULT = "result"  # 工具事件中的查单结果。
-    OBSERVATION = "observation"  # 当前工具事件经核对后的观察。
-    ORDER_RESULT = "order_result"  # 观察中或图状态中独立保存的查单结果。
-    ORDER = "order"  # 成功查单时返回的本人订单详情。
-    REFUND_RESULT = "refund_result"  # 退款办理或原单核对后保存的业务回执。
-    REFUND = "refund"  # 回执中已确认的模拟退款记录。
+# 将查单目标约束为已知枚举或空值，沿用现有 Schema 表示。
+OrderGoalValue = Annotated[
+    Annotated[OrderGoal, BeforeValidator(OrderGoal)] | None,
+    WithJsonSchema({"anyOf": [{"type": "string", "enum": [goal.value for goal in OrderGoal]},
+                             {"type": "null"}], "title": "Order Goal"}),
+]
+
+# 将本轮政策需求约束为业务枚举或空值。
+PolicyRequestValue = Annotated[
+    Annotated[PolicyRequest, BeforeValidator(PolicyRequest)] | None,
+    WithJsonSchema({"anyOf": [{"type": "string", "enum": [request.value for request in PolicyRequest]},
+                             {"type": "null"}], "title": "Policy Request"}),
+]
 
 
 # 保存模型识别的业务意图以及当前消息中的订单号。
@@ -49,16 +56,16 @@ class BusinessConversationDecision(StrictModel):
     intent: Annotated[ConversationIntent, BeforeValidator(ConversationIntent), status_schema(ConversationIntent, "Intent")]
     # 从本轮消息中识别的订单号，消费者未提供时为 None。
     order_id: str | None
-    # 查单的具体目标是了解订单状态或咨询退款资格，其他意图默认无查单目标。
-    order_goal: Annotated[
-        Annotated[OrderGoal, BeforeValidator(OrderGoal)] | None,
-        WithJsonSchema({"anyOf": [{"type": "string", "enum": [goal.value for goal in OrderGoal]},
-                                 {"type": "null"}], "title": "Order Goal"}),
-    ] = None
+    # 了解订单状态或咨询退款资格，其他意图显式提供 None。
+    order_goal: OrderGoalValue
 
 
 # 将模型业务判断和当前消息中解析出的偏好指令组合成完整意图。
 class ConversationDecision(BusinessConversationDecision):
+    # 应用采用的查单目标，现行会话状态允许省略，缺省时为 None。
+    order_goal: OrderGoalValue = None
+    # 应用采用的本轮政策需求。无主动需求时省略该字段，沿用现有会话状态格式。
+    policy_request: PolicyRequestValue = Field(default=None, exclude_if=lambda request: request is None)
     # 当前消息中的显式长期偏好命令，可与业务意图同时存在。
     memory_request: PreferenceCommand | None = None
     # 仅本轮适用的订单状态表达方式，不写入偏好表。
@@ -97,7 +104,7 @@ class PolicyStep(StrictModel):
 
 # 保存本轮查单、政策检索或有序组合的调查计划。
 class InvestigationPlan(StrictModel):
-    # 按执行顺序列出的调查步骤。查询订单退款资格时先查单，再检索适用政策。
+    # 按执行顺序列出的调查步骤。资格咨询和办理先查单。
     steps: list[InvestigationStep | PolicyStep] = Field(min_length=1, max_length=RefundLimits.MAX_INVESTIGATION_STEPS)
 
 
@@ -184,8 +191,8 @@ class OrderTurn(StrictModel):
     history: list[ExchangeMessage]
     # 本轮请求唯一的追踪编号，用于串联图节点、工具调用和政策依据核对。
     trace_id: str
-    # 实际 Host 提供的本轮原始用户消息位置，旧 checkpoint 可缺省。
-    refund_source: RefundTurnSource | None = None
+    # 本轮原始用户消息位置，调用方未持久化该消息时显式传入 None。
+    refund_source: RefundTurnSource | None
 
 
 # 描述节点可以写入的字段。省略字段表示保留旧值，显式传入 None 表示清空。
@@ -210,6 +217,10 @@ class OrderStateUpdate(StrictModel):
     step_index: int = 0
     # 已核验的订单查询结果，供后续政策调查使用。
     order_result: OrderQueryResult | None = None
+    # 已确认且需要解释的拒绝资格。事务内拒绝时清除早前的查单事实，以事务回执为准。
+    denial_qualification: Annotated[RefundQualification, BeforeValidator(RefundQualification)] | None = None
+    # 主动索要依据时用于核验条款的已确认资格。没有主动调查或已有拒绝资格时为空。
+    policy_qualification: Annotated[RefundQualification, BeforeValidator(RefundQualification)] | None = None
     # 缺少订单号时暂存的资格咨询问题，等待同会话补充。
     eligibility_question: str | None = None
     # 本轮要回答的问题；补充订单号时恢复为原资格问题。
@@ -220,85 +231,12 @@ class OrderStateUpdate(StrictModel):
     policy_results: list[PolicySearchResult] = Field(default_factory=list)
     # 仅明确办理且本轮订单已绑定时存在，换轮重置。
     refund_authorization: AuthorizedRefundIntent | None = None
-    # 已确认持久保存的政策核验事件，提交前还须核对属于当前活跃轮次。
-    refund_verification: RefundPolicyVerification | None = None
+    # 独立复核通过后生成的单次提交信息，发送前仍须核对属于当前活跃轮次。
+    prepared_refund: PreparedRefund | None = None
     # 固定退款节点获得的业务回执或阻断原因。
     refund_result: RefundResult | None = None
 
 
 # 将本轮输入与已合并的调查状态提供给图节点，持久化时沿用字典和字符串枚举。
 class OrderState(OrderTurn, OrderStateUpdate):
-    # 读取历史图状态时移除已知订单详情及退款回执中的人民币币种。
-    @model_validator(mode="before")
-    @classmethod
-    def read_legacy_amounts(cls, value: object) -> object:
-
-        # region 兼容历史工具事件、调查观察、查单结果及退款回执
-        if not isinstance(value, dict):
-
-            # region 非映射交由状态模型原有校验
-            return value
-            # endregion
-
-        updates = legacy_amount_updates(value)
-        return {**value, **updates} if updates else value
-        # endregion
-
-
-# 提取必须重新写入的历史金额通道，供图状态验证和快照保存共用。
-def legacy_amount_updates(values: dict[str, Any]) -> dict[str, Any]:
-
-    # region 按持久化状态的四种已知形态整理含旧字段的通道
-    updates = {}
-    field = RefundCheckpointField
-    for channel, path in (
-        (field.EVENT, (field.RESULT, field.ORDER)),
-        (field.OBSERVATION, (field.ORDER_RESULT, field.ORDER)),
-        (field.ORDER_RESULT, (field.ORDER,)),
-        (field.REFUND_RESULT, (field.REFUND,)),
-    ):
-        original = values.get(channel)
-        converted = _without_legacy_currency(original, path)
-        if converted is not original:
-
-            # region 仅保存发生升级的通道及其无币种内容
-            updates[channel.value] = converted
-            # endregion
-
-    return updates
-    # endregion
-
-
-# 沿指定快照字段路径移除旧人民币币种，保留原快照与其他字段供原有校验使用。
-def _without_legacy_currency(value: object, path: tuple[RefundCheckpointField, ...]) -> object:
-
-    # region 缺少历史字段时直接复用快照节点
-    if not isinstance(value, dict):
-
-        # region 当前路径没有可转换的历史映射
-        return value
-        # endregion
-
-    if not path:
-
-        # region 仅移除合法的历史人民币值，其余值保留并由严格模型拒绝
-        if value.get(LegacyCurrency.FIELD) != LegacyCurrency.CNY:
-
-            # region 没有旧人民币字段时保留原值
-            return value
-            # endregion
-
-        result = value.copy()
-        del result[LegacyCurrency.FIELD]
-        return result
-        # endregion
-
-    # endregion
-
-    # region 仅在子值转换后复制当前字段映射
-    field, *remaining = path
-    original = value.get(field)
-    converted = _without_legacy_currency(original, tuple(remaining))
-    return value if converted is original else {**value, field.value: converted}
-    # endregion
-
+    pass

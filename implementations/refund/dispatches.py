@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 
 from interfaces.refund.storage import RefundDispatchService
 from model.refund.status import DispatchStatus, RefundOutcome
-from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerification, RefundResult
+from model.refund.submission import AuthorizedRefundIntent, PreparedRefund, RefundResult
 from repositories import dispatch_repository
 
 
@@ -27,12 +27,12 @@ class MySQLRefundDispatchService(RefundDispatchService):
         # endregion
 
     # 为此次授权保存新提交。只有确认了本次 INSERT 和 COMMIT 才允许发送。
-    def reserve_dispatch(self, event: RefundPolicyVerification) -> bool:
+    def reserve_dispatch(self, prepared: PreparedRefund) -> bool:
 
         # region 验证可信会话和用户原文并持久化单次提交
         try:
             with self._engine.begin() as connection:
-                inserted = dispatch_repository.insert_dispatch(connection, event=event, status=DispatchStatus.PENDING)
+                inserted = dispatch_repository.insert_dispatch(connection, prepared=prepared, status=DispatchStatus.PENDING)
             return inserted
         except IntegrityError:
 

@@ -19,7 +19,7 @@ def test_explicit_list_returns_dedicated_preference_result():
         pytest.fail("查看偏好不应调用调查工具")
 
     graph = build_graph(decide, investigate, lambda *args, **fields: None, search=investigate)
-    turn = OrderTurn(history=[ExchangeMessage(role="user", content="查看我的长期偏好")], trace_id="list-test")
+    turn = OrderTurn(history=[ExchangeMessage(role="user", content="查看我的长期偏好")], trace_id="list-test", refund_source=None)
     state = run_refund_turn(graph, "test", turn)
     assert state.decision.memory_request.action == "list"
     assert state.preference_result.status == "failed"
@@ -56,10 +56,9 @@ def test_preference_checkpoint_preserves_structured_command():
 def test_old_or_quoted_instruction_cannot_restore_deleted_value(current):
     saver = InMemorySaver()
     old = ExchangeMessage(role="user", content="请帮我记住以后简短回答。")
-    command = {"action": "set", "key": "response_detail", "value": "brief"}
-
     def decide(schema, _prompt):
-        return schema(intent="memory_request", order_id=None, memory_request=command)
+        return schema(intent="memory_request", order_id=None, order_goal=None, order_id_status="missing",
+                      order_id_evidence=None, continues_eligibility_question=False)
 
     def apply(_command):
         return PreferenceResult(status=PreferenceStatus.UPDATED, detail=ResponseDetail.BRIEF)
@@ -69,16 +68,17 @@ def test_old_or_quoted_instruction_cannot_restore_deleted_value(current):
 
     graph = build_graph(decide, investigate, lambda *args, **fields: None, saver,
                         search=investigate, is_live=lambda _: True, preferences=apply)
-    first = run_refund_turn(graph, "old-session", OrderTurn(history=[old], trace_id="old"))
+    first = run_refund_turn(graph, "old-session", OrderTurn(history=[old], trace_id="old", refund_source=None))
     assert first.preference_result.status is PreferenceStatus.UPDATED
-    turn = OrderTurn(history=[old, ExchangeMessage(role="user", content=current)], trace_id="new")
+    turn = OrderTurn(history=[old, ExchangeMessage(role="user", content=current)], trace_id="new", refund_source=None)
     state = run_refund_turn(graph, "old-session", turn)
     assert state.preference_result is None and state.response_detail is None
 
 
 def test_mixed_policy_command_keeps_policy_question_independent():
     def decide(schema, _prompt):
-        return schema(intent="policy_question", order_id=None)
+        return schema(intent="policy_question", order_id=None, order_goal=None, order_id_status="missing",
+                      order_id_evidence=None, continues_eligibility_question=False)
 
     def search(step, *_args):
         assert step.query == "退款多久到账？"
@@ -87,7 +87,7 @@ def test_mixed_policy_command_keeps_policy_question_independent():
     graph = build_graph(decide, lambda *_args: pytest.fail("政策咨询不应查单"),
                         lambda *args, **fields: None, search=search)
     turn = OrderTurn(history=[ExchangeMessage(role="user", content="退款多久到账？顺便查看我的长期偏好。")],
-                     trace_id="mixed")
+                     trace_id="mixed", refund_source=None)
     state = run_refund_turn(graph, "test", turn)
     assert state.preference_result.status is PreferenceStatus.FAILED
     assert state.reply == "暂时无法核实退款政策，请稍后再试。"
@@ -95,18 +95,18 @@ def test_mixed_policy_command_keeps_policy_question_independent():
 
 def test_business_intent_cannot_add_a_preference_command():
     def decide(schema, _prompt):
-        return schema(intent="policy_question", order_id=None, memory_request={"action": "delete", "key": "response_detail"})
+        return schema(intent="policy_question", order_id=None, order_goal=None, order_id_status="missing", order_id_evidence=None,
+                      continues_eligibility_question=False, memory_request={"action": "delete", "key": "response_detail"})
 
-    def search(step, *_args):
-        assert step.query == "退款多久到账？"
-        return None
+    def search(*_args):
+        pytest.fail("模型违反业务契约时不应启动政策调查")
 
     graph = build_graph(decide, lambda *_args: pytest.fail("政策咨询不应查单"),
                         lambda *args, **fields: None, search=search)
-    turn = OrderTurn(history=[ExchangeMessage(role="user", content="退款多久到账？")], trace_id="policy")
+    turn = OrderTurn(history=[ExchangeMessage(role="user", content="退款多久到账？")], trace_id="policy", refund_source=None)
     state = run_refund_turn(graph, "test", turn)
     assert state.preference_result is None
-    assert state.reply == "暂时无法核实退款政策，请稍后再试。"
+    assert state.reply == "本轮未能完成订单查询，请稍后再试。"
 
 
 def test_casual_style_statement_creates_neither_preference_nor_pending_order():
@@ -114,7 +114,7 @@ def test_casual_style_statement_creates_neither_preference_nor_pending_order():
         pytest.fail("普通偏好陈述不应调用模型或调查工具")
 
     graph = build_graph(unexpected, unexpected, lambda *args, **fields: None, search=unexpected)
-    turn = OrderTurn(history=[ExchangeMessage(role="user", content="我平时喜欢详细的说明。")], trace_id="casual")
+    turn = OrderTurn(history=[ExchangeMessage(role="user", content="我平时喜欢详细的说明。")], trace_id="casual", refund_source=None)
     state = run_refund_turn(graph, "test", turn)
     assert state.preference_result is None and state.eligibility_question is None
     assert "明确要求记住" in state.reply
@@ -133,7 +133,7 @@ def test_business_model_failure_preserves_independent_preference_result():
     graph = build_graph(decide, investigate, lambda *args, **fields: None,
                         search=investigate, preferences=apply, is_live=lambda _: True)
     turn = OrderTurn(history=[ExchangeMessage(role="user", content="退款多久到账？顺便查看我的长期偏好。")],
-                     trace_id="mixed-model-error")
+                     trace_id="mixed-model-error", refund_source=None)
     state = run_refund_turn(graph, "test", turn)
     assert state.reply == "本轮未能识别业务请求，请稍后再试。"
     assert state.preference_result.status is PreferenceStatus.LISTED
@@ -148,6 +148,7 @@ def test_resuming_pending_preference_node_does_not_replay_write():
     checkpoint = {"configurable": {"thread_id": "interrupted"}}
     graph.update_state(checkpoint, {
         "history": [{"role": "user", "content": "请记住以后简短回答。"}], "trace_id": "interrupted-turn",
+        "refund_source": None,
         "decision": {"intent": "memory_request", "order_id": None,
                      "memory_request": {"action": "set", "key": "response_detail", "value": "brief"}},
     }, as_node="intent")

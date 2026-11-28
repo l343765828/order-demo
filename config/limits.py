@@ -52,13 +52,14 @@ class RefundTables:
     DISPATCHES: Final = "refund_dispatches"  # Host 保存的授权和提交状态。
     SESSIONS: Final = "conversation_sessions"  # 会话归属。
     MESSAGES: Final = "conversation_messages"  # 授权来源原文。
-    DISPATCH_REFUND_FOREIGN_KEY: Final = "fk_dispatch_refund"  # 确保提交只引用同订单的退款。
+    SUMMARIES: Final = "conversation_summaries"  # 按退款会话保存的历史摘要。
 
 
-# 声明数据库迁移和退款会话恢复识别的历史人民币字段。
-class LegacyCurrency:
-    FIELD: Final = "currency"  # 旧数据库列及旧快照金额字段的名称。
-    CNY: Final = "CNY"  # 历史演示金额按人民币分保存时使用的值。
+# LangGraph MySQL Saver 保存本退款流程快照和相关通道的表名。
+class RefundCheckpointTables:
+    CHECKPOINTS: Final = "checkpoints"  # 图状态的历史快照。
+    BLOBS: Final = "checkpoint_blobs"  # 各通道版本的序列化值。
+    WRITES: Final = "checkpoint_writes"  # 图节点已提交的中间写入。
 
 
 # 声明退款会话持久化使用的固定标识。
@@ -70,7 +71,7 @@ class ConversationStorage:
 class PolicyCatalogTables:
     HEAD: Final[str] = 'policy_catalog_head'  # 保存对新调查开放的最新修订。
     RELEASES: Final[str] = 'policy_releases'  # 保存每份文档版本的发布历史。
-    VERSION_LOCK_NAMESPACE: Final[str] = 'policy'  # 兼容原发布入口持有的版本锁。
+    VERSION_LOCK_NAMESPACE: Final[str] = 'policy'  # 标识政策版本发布使用的命名锁。
 
 
 # 统一政策向量存储和检索使用的集合名称与约束。
@@ -91,6 +92,11 @@ class PolicyLimits:
     MAX_RANKED_ENTRIES: Final[int] = 3  # 单次检索最多返回的重排条目数。
     EXCERPT_BOUNDARIES: Final[str] = "。！？；\n"  # 中文条款原文可用的句段分隔符。
     EXPLICIT_SCOPE_WORD: Final[str] = "仅限"  # 提示原文具有明确适用范围的词。
+    # 匹配以退款办理为结论的必要条件句。
+    REFUND_SCOPE_CONDITION_PATTERN: Final[str] = (
+        r"(?:只有|须)[^。！？；\n]*?(?:才能|才可|方可)"
+        r"(?:(?:办理)?(?:模拟)?退款|办理)[ \t]*(?=[。！？；，,\n]|$)"
+    )
     EXPLICIT_EXCEPTION_WORD: Final[str] = "除外"  # 提示原文有独立排除条件的词。
     MILVUS_CONNECT_TIMEOUT_SECONDS: Final[int] = 10  # 连接 Milvus 的超时秒数。
     MILVUS_SEARCH_TIMEOUT_SECONDS: Final[int] = 15  # Milvus 检索的超时秒数。

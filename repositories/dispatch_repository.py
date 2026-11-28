@@ -6,7 +6,7 @@ from sqlalchemy import Connection
 
 from config.limits import RefundTables
 from model.refund.status import ConversationRole, DispatchStatus, RefundReason
-from model.refund.submission import AuthorizedRefundIntent, RefundDispatch, RefundDispatchKeyRow, RefundPolicyVerification
+from model.refund.submission import AuthorizedRefundIntent, PreparedRefund, RefundDispatch, RefundDispatchKeyRow
 from utils.sql_loader import load_sql
 
 _GET_BLOCKING_DISPATCH_SQL: Final = "dispatches/get_blocking_dispatch.sql"
@@ -29,15 +29,15 @@ def get_blocking_dispatch(connection: Connection, *, authorization: AuthorizedRe
 
 
 # 使用已保存的用户原文插入本次提交，返回是否有一行写入。
-def insert_dispatch(connection: Connection, *, event: RefundPolicyVerification, status: DispatchStatus) -> bool:
+def insert_dispatch(connection: Connection, *, prepared: PreparedRefund, status: DispatchStatus) -> bool:
 
-    # region 绑定本次政策事件、授权来源及初始提交状态并执行插入
-    authorization = event.authorization
+    # region 绑定本次提交、授权来源及初始提交状态并执行插入
+    authorization = prepared.authorization
     result = connection.execute(
         load_sql(_INSERT_DISPATCH_SQL, dispatches=RefundTables.DISPATCHES,
                  sessions=RefundTables.SESSIONS, messages=RefundTables.MESSAGES),
-        {**authorization.model_dump(), "idempotency_key": event.idempotency_key, "role": ConversationRole.USER.value,
-         "status": status.value, "trace_id": event.trace_id},
+        {**authorization.model_dump(), "idempotency_key": prepared.idempotency_key, "role": ConversationRole.USER.value,
+         "status": status.value, "trace_id": prepared.trace_id},
     )
     return result.rowcount == 1
     # endregion

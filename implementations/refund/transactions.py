@@ -6,8 +6,9 @@ from sqlalchemy import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from config.demo import MOCK_REFUND_ID_PREFIX
-from implementations.refund.qualification import reject_refund_for_order_state
+from implementations.refund.qualification import qualify_refund
 from interfaces.refund.storage import RefundTransactionService
+from model.orders.status import RefundStatus
 from model.refund.status import DispatchStatus, RefundLookupStatus, RefundOutcome, RefundReason, RefundSource
 from model.refund.submission import (
     GetRefundResultRequest, RefundLookupResult, RefundReceipt, RefundRecord, RefundResult, SubmitMockRefundRequest,
@@ -73,7 +74,9 @@ def _execute(connection: Connection, *, request: SubmitMockRefundRequest, consum
         # endregion
 
     order = order_repository.get_locked_order(connection, order_id=request.order_id, consumer_id=consumer_id)
-    rejection = reject_refund_for_order_state(order.payment_status, order.shipping_status)
+    qualification = qualify_refund(payment_status=order.payment_status, shipping_status=order.shipping_status,
+                                   refund_status=RefundStatus.NOT_REFUNDED)
+    rejection = qualification.denial_reason
     if rejection is not None:
 
         # region 订单不符合当前退款资格时返回拒绝原因

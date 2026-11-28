@@ -59,23 +59,19 @@ async def check_mcp_permissions(url, token, session_id):
     return 2
 
 
-def verify(source, legacy_root=None):
+def verify(source):
     with isolated_order_database(source) as (config_path, cur):
-        if legacy_root is not None:
-            settings = json.loads(config_path.read_text(encoding="utf-8"))
-            settings["qwen"].setdefault("api_key", "unused-by-local-qwen")
-            config_path.write_text(json.dumps(settings), encoding="utf-8")
-        verify_cli(config_path, cur, legacy_root)
+        verify_cli(config_path, cur)
 
 
-def verify_cli(config_path, cur, legacy_root=None):
+def verify_cli(config_path, cur):
     settings = load_config(config_path)
     env = {**os.environ, "PYTHONUTF8": "1"}
 
-    def cli(*args, user_input=None, code=0, root=ROOT):
-        command = [sys.executable, str(root / "test" / "launch_with_config.py"), "cli", str(config_path), *args]
+    def cli(*args, user_input=None, code=0):
+        command = [sys.executable, str(ROOT / "test" / "launch_with_config.py"), "cli", str(config_path), *args]
         result = subprocess.run(
-            command, cwd=root, env=env,
+            command, cwd=ROOT, env=env,
             input=user_input, capture_output=True, encoding="utf-8", timeout=180,
         )
         events = read_events(result.stderr)
@@ -90,27 +86,10 @@ def verify_cli(config_path, cur, legacy_root=None):
         dispatch_count = cur.fetchone()[0]
         cli("--init-checkpoints")
         empty_sid = MySQLConversationService(engine).create(CONSUMER_ID)
-        pending_checkpoint = None
-        if legacy_root is not None:
-            fixture = subprocess.run(
-                [sys.executable, str(ROOT / "test" / "seed_legacy_refund_checkpoint.py"), str(legacy_root),
-                 str(config_path)], cwd=legacy_root, env=env, capture_output=True, encoding="utf-8", timeout=30,
-            )
-            assert fixture.returncode == 0, fixture.stderr
-            pending_checkpoint = json.loads(fixture.stdout)
-            pending_sid = pending_checkpoint["session"]
-            pending_history, pending_events, _ = cli("--session", pending_sid, "--history")
-            pending_loaded, = pending_events
-            assert pending_loaded["event"] == "session_loaded" and pending_loaded["checkpoint"]
-            assert pending_loaded["pending_nodes"] == ["send_refund"] and pending_loaded["messages"] == 1
-            assert pending_loaded["trace_id"] == pending_checkpoint["trace"]
-            assert pending_history.splitlines() == [f"会话：{pending_sid}", f"user：{pending_checkpoint['message']}"]
-            pending = PyMySQLSaver(cur.connection).get_tuple({"configurable": {"thread_id": pending_sid}})
-            assert pending is not None and pending.checkpoint["id"] == pending_checkpoint["checkpoint_id"]
 
         with order_mcp_process(config_path, env=env) as log:
             original = "查一下 DEMO-1001"
-            own, own_events, _ = cli(user_input=original + "\n", root=legacy_root or ROOT)
+            own, own_events, _ = cli(user_input=original + "\n")
             assert "实付 19900 分" in own and "已支付，未发货" in own, own_events
             assert own.startswith("会话：")
             sid = own.splitlines()[0].removeprefix("会话：")
@@ -133,6 +112,8 @@ def verify_cli(config_path, cur, legacy_root=None):
             channels = cp.checkpoint["channel_values"]
             assert channels["trace_id"] == seen["trace_id"]
             assert "19900" in channels["reply"]
+            order = channels["order_result"]["order"]
+            assert order["paid_amount_fen"] == 19900 and "currency" not in order
 
             foreign, _, _ = cli("--session", empty_sid, "--history")
             assert original not in foreign
@@ -184,8 +165,6 @@ def verify_cli(config_path, cur, legacy_root=None):
         print(json.dumps({
             "session_id": sid, "trace_id": seen["trace_id"], "host_pid": seen["pid"],
             "server_pid": receipt["pid"], "reopened_host_pid": loaded["pid"],
-            "legacy_host_wrote_first_turn": legacy_root is not None,
-            "pending_refund_checkpoint": pending_checkpoint is not None,
             "nodes": nodes,
             "plan": first["plan"]["plan"], "delegation_id": first["deepagent_delegate"]["delegation_id"],
             "model_tool_call_id": seen["model_tool_call_id"], "mcp_request_id": receipt["mcp_request_id"],
@@ -203,6 +182,5 @@ def verify_cli(config_path, cur, legacy_root=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, help="JSON 配置文件路径")
-    parser.add_argument("--legacy-root", type=Path, help="用于生成旧会话的原 CLI 检出路径")
     args = parser.parse_args()
-    verify(args.config, args.legacy_root.resolve() if args.legacy_root else None)
+    verify(args.config)

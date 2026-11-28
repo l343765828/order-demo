@@ -19,6 +19,6 @@ CREATE TABLE IF NOT EXISTS {releases} (
     CONSTRAINT ck_policy_qualification CHECK (qualification IN ('unchanged', 'changed')),
     CONSTRAINT ck_policy_write CHECK (write_state IN ('not_started', 'pending', 'finished')),
     CONSTRAINT ck_policy_activation CHECK (
-        activated_revision IS NULL OR (activated_revision > 0 AND write_state <> 'pending' AND qualification = 'unchanged')
+        activated_revision IS NULL OR (activated_revision > 0 AND write_state = 'finished' AND qualification = 'unchanged')
     )
 ) ENGINE=InnoDB DEFAULT CHARACTER SET=utf8mb4;

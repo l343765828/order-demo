@@ -12,7 +12,21 @@ from model.policy.status import PolicyEntryType, PolicyEvidenceStatus
 
 POLICY_UNAVAILABLE = "暂时无法核实退款政策，请稍后再试。"
 NO_EVIDENCE = "当前政策文档未说明，暂无法给出有依据的回答。"
-LEGACY_FAQ_REFERENCES = re.compile(r"\s*依据：RF-\d{3}(?:、RF-\d{3})*。\s*$")
+FAQ_REFERENCE_SUFFIX = re.compile(r"\s*依据：RF-\d{3}(?:、RF-\d{3})*。\s*$")
+# 到账主题的明确用语及口语表述，供检索和引用核对使用。
+_FUNDS_ARRIVAL = "到账"
+FUNDS_ARRIVAL_TOPIC = re.compile(rf"{_FUNDS_ARRIVAL}|(?:退回|回到|退到)(?:原(?:支付)?|付款|支付)账户")
+_ARRIVAL_TIME_WORDS = re.compile(r"多久|何时|什么时候|几天|时间|期限|时限")
+
+
+# 判断消费者明确询问到账或退款返回账户的时间。
+def asks_about_funds_arrival(question: str) -> bool:
+
+    # region 区分询问退款时间和只询问退款渠道
+    return _FUNDS_ARRIVAL in question or (
+        _ARRIVAL_TIME_WORDS.search(question) is not None and FUNDS_ARRIVAL_TOPIC.search(question) is not None
+    )
+    # endregion
 
 
 # 从当前成功回执选答；results 的首项固定目录修订，末项提供本次候选。
@@ -67,9 +81,22 @@ def answer_policy(
                 case PolicyEntryType.POLICY:
                     answer = selected.text
                 case PolicyEntryType.FAQ:
-                    answer = LEGACY_FAQ_REFERENCES.sub("", selected.text.split("\n", 1)[-1]).strip()
-            if answer:
+                    answer = FAQ_REFERENCE_SUFFIX.sub("", selected.text.split("\n", 1)[-1]).strip()
+            if (
+                # 从候选中取得了可返回的正文。
+                answer
+                and (
+                    # 本轮问题没有明确询问款项到账。
+                    not asks_about_funds_arrival(question)
+                    # 正文包含能回答到账问题的相关表述。
+                    or FUNDS_ARRIVAL_TOPIC.search(answer) is not None
+                )
+            ):
+
+                # region 回答内容与所问主题相符时附上已核验出处
                 return f"{answer}\n依据：《{selected.title}》{selected.version} 版 {selected.clause_id}。", evidence, None
+                # endregion
+
             # endregion
 
     # endregion

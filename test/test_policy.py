@@ -16,6 +16,18 @@ from utils.vectors import normalize_vector
 POLICY_SOURCE = Path(__file__).resolve().parents[1] / 'policy' / 'refund-policy.md'
 
 
+def test_cutover_policy_changes_only_rf_013_and_keeps_business_outcome():
+    old = read_policy_document(POLICY_SOURCE.read_text(encoding='utf-8'), version='1.0')
+    new = read_policy_document(POLICY_SOURCE.with_name('refund-policy-1.1.md').read_text(encoding='utf-8'), version='1.1')
+    assert new.target.document_id == old.target.document_id
+    old_texts = {entry.clause_id: entry.text for entry in old.entries}
+    new_texts = {entry.clause_id: entry.text for entry in new.entries}
+    assert new_texts.keys() == old_texts.keys()
+    assert [clause for clause in new_texts if new_texts[clause] != old_texts[clause]] == ['RF-013']
+    assert '办理无需预先取得政策依据' in new_texts['RF-013']
+    assert '保留已确认的业务结果' in new_texts['RF-013']
+
+
 class PolicyTests(unittest.TestCase):
     def test_source_entries_and_faq_without_citation(self):
         source = POLICY_SOURCE.read_text(encoding='utf-8')
@@ -177,8 +189,8 @@ class ResultTests(unittest.TestCase):
         from model.policy.search import PolicySearchResult
         from pydantic import ValidationError
         candidate = {'document_id':'d','title':'t','version':'1','clause_id':'RF-001','entry_type':'policy','text':'x'}
-        for value in ({'status':'failed','event_id':'event','candidates':[candidate]},
-                      {'status':'ok','event_id':'event','candidates':[], 'extra':1}):
+        for value in ({'status':'failed','event_id':'event','catalog_revision':None,'candidates':[candidate]},
+                      {'status':'ok','event_id':'event','catalog_revision':1,'candidates':[], 'extra':1}):
             with self.assertRaises(ValidationError): PolicySearchResult.model_validate(value)
 
     def test_rejects_source_header_mismatch(self):
@@ -194,7 +206,8 @@ class HostScopeTests(unittest.IsolatedAsyncioTestCase):
         class Bound:
             async def call(self, args, **kwargs):
                 seen.append(args)
-                return PolicySearchResult(status=PolicySearchStatus.OK, event_id='event', candidates=[])
+                return PolicySearchResult(status=PolicySearchStatus.OK, event_id='event',
+                                          candidates=[], catalog_revision=1)
         tool = make_policy_tool(Bound(), 'formal')
         self.assertNotIn('mode', tool.args)
         result = await tool.ainvoke({'query':'退款'})

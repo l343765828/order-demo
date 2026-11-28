@@ -1,16 +1,35 @@
-"""退款办理依据的确定性支付和发货规则。"""
+"""按可信本人订单的当前状态判断退款资格。"""
 
-from model.orders.status import PaymentStatus, ShippingStatus
-from model.refund.status import RefundReason
+from model.orders.status import PaymentStatus, RefundStatus, ShippingStatus
+from model.refund.status import RefundQualification
 
 
-# 根据可信支付及发货状态返回拒绝原因，None 表示订单状态允许退款。
-def reject_refund_for_order_state(payment_status: PaymentStatus, shipping_status: ShippingStatus) -> RefundReason | None:
+# 根据已核实的支付、发货及退款状态返回本次资格结论。
+def qualify_refund(
+    *, payment_status: PaymentStatus, shipping_status: ShippingStatus, refund_status: RefundStatus,
+) -> RefundQualification:
 
-    # region 按优先级拒绝未支付和已发货订单
+    # region 优先识别原退款，再按支付和发货状态判断首次办理资格
+    if refund_status is RefundStatus.REFUNDED:
+
+        # region 存在原退款时返回既有结果
+        return RefundQualification.ALREADY_REFUNDED
+        # endregion
+
     if payment_status is PaymentStatus.UNPAID:
-        return RefundReason.UNPAID
+
+        # region 未支付时没有可退款项
+        return RefundQualification.UNPAID
+        # endregion
+
     if shipping_status is ShippingStatus.SHIPPED:
-        return RefundReason.SHIPPED
-    return None
+
+        # region 已支付但已发货时拒绝首次办理
+        return RefundQualification.SHIPPED
+        # endregion
+
+    # region 已付、未发货且无原退款时允许办理
+    return RefundQualification.ELIGIBLE
+    # endregion
+
     # endregion

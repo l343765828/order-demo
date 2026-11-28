@@ -8,8 +8,9 @@ from pydantic import BeforeValidator, Field, model_validator
 from config.limits import RefundLimits
 from model.base import StrictModel, status_schema
 from model.orders.query import GetOrderRequest, OrderQueryId
-from model.policy.evidence import PolicyEvidence
-from model.refund.status import DispatchStatus, RefundLookupStatus, RefundOutcome, RefundReason, RefundSource
+from model.refund.status import (
+    DispatchStatus, RefundLookupStatus, RefundOutcome, RefundQualification, RefundReason, RefundSource,
+)
 
 RefundIdentifier = Annotated[str, Field(strict=True, min_length=1, max_length=RefundLimits.MAX_REFUND_IDENTIFIER_CHARS)]
 
@@ -30,16 +31,14 @@ class AuthorizedRefundIntent(RefundTurnSource):
     order_id: OrderQueryId
 
 
-# 记录一次写入前已核对的政策及关联字段，供结构化日志持久化。
-class RefundPolicyVerification(StrictModel):
+# 保存独立复核通过后为当前轮次准备的单次退款提交信息。
+class PreparedRefund(StrictModel):
     # 本次调查从 CLI 到 MCP 的追踪标识。
     trace_id: RefundIdentifier
     # 本次提交唯一键，后续与提交记录和实际退款对账。
     idempotency_key: RefundIdentifier
-    # 确认适用的订单和原始授权消息。
+    # 经复核的目标订单和本轮原始授权消息。
     authorization: AuthorizedRefundIntent
-    # 本次版本快照内已核验的正式引用，包含原文及事件编号。
-    evidence: PolicyEvidence
 
 
 # 退款执行请求仅包含订单号和已持久化提交的幂等键。
@@ -103,10 +102,24 @@ class RefundResult(StrictModel):
 
     # 区分本人订单因支付或发货状态被拒的结果，此类拒绝可继续只读检索政策。
     @property
-    def is_order_state_denial(self) -> bool:
+    def order_state_denial(self) -> RefundQualification | None:
 
-        # region 根据办理结果及原因识别需要解释的资格拒绝
-        return self.status is RefundOutcome.DENIED and self.reason in (RefundReason.UNPAID, RefundReason.SHIPPED)
+        # region 排除非拒绝结果
+        if self.status is not RefundOutcome.DENIED:
+            return None
+        # endregion
+
+        # region 将需要解释的拒绝原因转换为已确认的资格结论
+        match self.reason:
+            case RefundReason.UNPAID:
+                return RefundQualification.UNPAID
+            case RefundReason.SHIPPED:
+                return RefundQualification.SHIPPED
+            case _:
+
+                # region 授权或订单不可操作等拒绝沿用原业务路径
+                return None
+                # endregion
         # endregion
 
     # 将 MCP 已校验的执行回执还原为业务模型和枚举。

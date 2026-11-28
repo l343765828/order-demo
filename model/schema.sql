@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS consumer_preferences (
  value VARCHAR(255) NOT NULL, updated_at DATETIME(6) NOT NULL,
  PRIMARY KEY (consumer_id, preference_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS refunds (
+ refund_id VARCHAR(64) PRIMARY KEY, order_id VARCHAR(64) NOT NULL,
+ idempotency_key VARCHAR(64) NULL, amount_fen BIGINT UNSIGNED NOT NULL,
+ source VARCHAR(24) NOT NULL, created_at DATETIME(6) NOT NULL,
+ UNIQUE KEY uq_refund_order (order_id), UNIQUE KEY uq_refund_key (idempotency_key),
+ UNIQUE KEY uq_refund_id_order (refund_id, order_id),
+ CONSTRAINT fk_refund_order FOREIGN KEY (order_id) REFERENCES orders(order_id),
+ CONSTRAINT chk_refund_source CHECK ((source='seed' AND idempotency_key IS NULL) OR (source='execution' AND idempotency_key IS NOT NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE TABLE IF NOT EXISTS refund_dispatches (
  idempotency_key VARCHAR(64) PRIMARY KEY, order_id VARCHAR(64) NOT NULL,
  session_id VARCHAR(64) NOT NULL, source_message_sequence BIGINT UNSIGNED NOT NULL,
@@ -42,14 +51,6 @@ CREATE TABLE IF NOT EXISTS refund_dispatches (
  KEY idx_dispatch_order_status (order_id, status),
  CONSTRAINT fk_dispatch_order FOREIGN KEY (order_id) REFERENCES orders(order_id),
  CONSTRAINT fk_dispatch_message FOREIGN KEY (session_id, source_message_sequence) REFERENCES conversation_messages(session_id, sequence),
+ CONSTRAINT fk_dispatch_refund FOREIGN KEY (refund_id, order_id) REFERENCES refunds(refund_id, order_id),
  CONSTRAINT chk_dispatch_status CHECK (status IN ('pending','unconfirmed','succeeded','closed_no_refund'))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE TABLE IF NOT EXISTS refunds (
- refund_id VARCHAR(64) PRIMARY KEY, order_id VARCHAR(64) NOT NULL,
- idempotency_key VARCHAR(64) NULL, amount_fen BIGINT UNSIGNED NOT NULL,
- source VARCHAR(24) NOT NULL, created_at DATETIME(6) NOT NULL,
- UNIQUE KEY uq_refund_order (order_id), UNIQUE KEY uq_refund_key (idempotency_key),
- UNIQUE KEY uq_refund_id_order (refund_id, order_id),
- CONSTRAINT fk_refund_order FOREIGN KEY (order_id) REFERENCES orders(order_id),
- CONSTRAINT chk_refund_source CHECK ((source='seed' AND idempotency_key IS NULL) OR (source='execution' AND idempotency_key IS NOT NULL))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

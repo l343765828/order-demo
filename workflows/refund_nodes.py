@@ -6,11 +6,13 @@ from config.limits import RefundLimits
 from implementations.orders.reply import ORDER_QUERY_INCOMPLETE, SERVICE_ERROR, order_reply
 from implementations.policy.answer import NO_EVIDENCE, POLICY_UNAVAILABLE, answer_policy
 from implementations.policy.eligibility import answer_eligibility, eligibility_query, eligibility_reply
-from implementations.refund.intent import resolve_intent
+from implementations.refund.intent import ORDER_NUMBER, resolve_intent
 from implementations.refund.execution import RefundExecution
+from implementations.refund.qualification import qualify_refund
 from implementations.refund.reply import refund_reply
 from interfaces.refund.decision import Decide
 from interfaces.refund.preference import ManagePreferences
+from model.orders.query import OrderQueryResult
 from model.orders.status import OrderQueryStatus
 from model.policy.status import PolicyEntryType, PolicyEvidenceStatus, PolicySearchMode, PolicySearchStatus
 from model.refund.flow import (
@@ -26,11 +28,11 @@ from model.refund.flow import (
     TaskObservation,
 )
 from model.refund.status import (
-    ConversationIntent, HostStepId, InvestigationKind, ObservationStatus, OrderGoal, ReplanAction,
-    RefundEvent, RefundOutcome, RefundReason,
+    ConversationIntent, HostStepId, InvestigationEvent, InvestigationKind, ObservationStatus, OrderGoal, PolicyRequest,
+    ReplanAction, RefundEvent, RefundOutcome, RefundQualification, RefundReason,
 )
 from model.refund.preference import ListPreferences, PreferenceAction, PreferenceEvent, PreferenceResult, PreferenceStatus
-from model.refund.submission import AuthorizedRefundIntent, RefundPolicyVerification, RefundResult
+from model.refund.submission import AuthorizedRefundIntent, PreparedRefund, RefundResult
 
 InvestigateOrder = Callable[[InvestigationStep, str], OrderToolEvent | None]
 SearchPolicy = Callable[[PolicyStep, str, PolicySearchMode], PolicyToolEvent | None]
@@ -178,12 +180,10 @@ def create_investigation_nodes(
             )
         ):
 
-            # region 指定订单的资格咨询先查订单，再检索适用政策
+            # region 指定订单的资格咨询和办理先取得本人订单事实
             investigation = InvestigationPlan(steps=[
                 InvestigationStep(step_id=HostStepId.ORDER.value, kind=InvestigationKind.INSPECT_ORDER,
                                   order_id=decision.order_id, depends_on=[], completion="取得本人订单事实"),
-                PolicyStep(step_id=HostStepId.POLICY.value, kind=InvestigationKind.RETRIEVE_POLICY, query=question,
-                           depends_on=[HostStepId.ORDER.value], completion="按实际订单状态查找适用条款"),
             ])
             # endregion
 
@@ -219,26 +219,21 @@ def create_investigation_nodes(
     # endregion
 
     # region 定义步骤准备和工具执行
-    # 读取当前步骤，政策步骤的实际查询依据已验证订单或唯一补查决定。
+    # 读取当前步骤，政策补查沿用首次回执的目录版本。
     def current_step(state: OrderState) -> InvestigationStep | PolicyStep:
 
-        # region 读取正在执行的计划步骤，政策查询优先使用补查文本，其次使用订单事实
+        # region 读取正在执行的计划步骤，政策补查替换查询并沿用目录版本
         if state.plan is None:
             raise ValueError("缺少调查计划")
         step = state.plan.steps[state.step_index]
         if isinstance(step, PolicyStep):
-            order = state.order_result.order if state.order_result else None
-            query = step.query
-            if order is not None:
 
-                # region 按已确认的订单事实构造资格政策查询
-                query = eligibility_query(order)
-                # endregion
+            # region 政策步用当前查询和本轮首个目录版本执行
+            step = step.model_copy()
+            step.query = state.retry_query or step.query
+            step.catalog_revision = state.policy_results[0].catalog_revision if state.policy_results else None
+            # endregion
 
-            return step.model_copy(update={
-                "query": state.retry_query or query,
-                "catalog_revision": state.policy_results[0].catalog_revision if state.policy_results else None,
-            })
         return step
         # endregion
 
@@ -259,11 +254,16 @@ def create_investigation_nodes(
     # endregion
 
     # region 固定政策调查使用范围
-    # 办理和政策补查限正式条款，普通咨询首次检索可含 FAQ。
+    # 按订单解释、先看正式条款和补查均限正式条款，通用咨询可含 FAQ。
     def policy_mode(state: OrderState) -> PolicySearchMode:
 
         # region 从召回前选择政策范围
-        formal = state.refund_authorization is not None or state.retry_query is not None
+        formal = (
+            state.denial_qualification is not None
+            or state.policy_qualification is not None
+            or state.retry_query is not None
+            or (state.decision is not None and state.decision.policy_request is PolicyRequest.BEFORE_REFUND)
+        )
         return PolicySearchMode.FORMAL if formal else PolicySearchMode.CONSULTATION
         # endregion
 
@@ -289,7 +289,7 @@ def create_investigation_nodes(
                 or event.query != step.query
             ):
                 emit("observation_rejected", step_id=step.step_id)
-                return OrderStateUpdate(reply=policy_failure_reply(state))
+                return OrderStateUpdate(reply=policy_reply(state, emit))
             if event.result.status is PolicySearchStatus.OK:
 
                 # region 成功回执缺少目录修订或补查结果超出本轮范围时停止咨询
@@ -312,7 +312,7 @@ def create_investigation_nodes(
                     )
                 ):
                     emit("observation_rejected", step_id=step.step_id)
-                    return OrderStateUpdate(reply=policy_failure_reply(state))
+                    return OrderStateUpdate(reply=policy_reply(state, emit))
                 # endregion
 
             observation = TaskObservation(
@@ -360,6 +360,62 @@ def create_investigation_nodes(
     # endregion
 
     # region 定义调查重规划和结束节点
+    # 取得消费者主动索要的政策问题，供检索和解释使用，省去订单编号。
+    def explicit_policy_question(state: OrderState) -> str | None:
+
+        # region 普通业务拒绝只用已确认的业务原因查询政策
+        if (
+            # 本轮还未识别出业务意图。
+            state.decision is None
+            # 本轮没有主动索要政策依据。
+            or state.decision.policy_request is None
+        ):
+            return None
+        # endregion
+
+        # region 查找主动请求的内容时删除订单编号并限制文本长度
+        return ORDER_NUMBER.sub("", state.question)[:RefundLimits.MAX_POLICY_QUERY_CHARS]
+        # endregion
+
+    # 按已确认的资格追加唯一的只读政策步骤，保留解释需要的事实和业务回执。
+    def investigate_order_policy(
+        state: OrderState, qualification: RefundQualification, *, order_result: OrderQueryResult | None = None,
+        refund_result: RefundResult | None = None, denial: bool = False,
+    ) -> OrderStateUpdate:
+
+        # region 在本人订单调查后安排唯一的条款解释步骤
+        assert state.plan is not None
+        plan = state.plan
+        if len(plan.steps) == 1:
+
+            # region 尚未安排政策检索时按确认的资格结果追加
+            policy_step = PolicyStep(
+                step_id=HostStepId.POLICY.value, kind=InvestigationKind.RETRIEVE_POLICY,
+                query=eligibility_query(qualification, policy_question=None if denial else explicit_policy_question(state)),
+                depends_on=[HostStepId.ORDER.value],
+                completion="按已确认的退款资格查找适用条款",
+            )
+            plan = InvestigationPlan(steps=[*plan.steps, policy_step])
+            # endregion
+
+        # endregion
+
+        # region 记录已确认的业务结果并推进到可恢复的政策步骤
+        if refund_result is not None:
+
+            # region 在政策调查之前记录实际办理回执
+            emit(RefundEvent.RESULT.value, result=refund_result.model_dump(mode="json"))
+            # endregion
+
+        emit(InvestigationEvent.REPLAN.value, decision=ReplanDecision(
+            action=ReplanAction.CONTINUE, reason="按已确认的退款资格调查适用条款",
+        ).model_dump(mode="json"))
+        return OrderStateUpdate(plan=plan, step_index=len(plan.steps) - 1,
+                                denial_qualification=qualification if denial else None,
+                                policy_qualification=None if denial else qualification, order_result=order_result,
+                                refund_result=refund_result)
+        # endregion
+
     # 按真实观察继续、限次补查或结束，消费者回复只采用核验后的结果。
     def replan(state: OrderState) -> OrderStateUpdate:
 
@@ -379,30 +435,26 @@ def create_investigation_nodes(
 
             # region 检索失败时记录失败决定并返回政策不可用提示
             if observation.status is ObservationStatus.FAILED:
-                emit("replan", decision=ReplanDecision(action=ReplanAction.FAIL, reason="政策检索失败").model_dump(mode="json"))
-                return OrderStateUpdate(reply=policy_failure_reply(state))
+                emit(InvestigationEvent.REPLAN.value, decision=ReplanDecision(
+                    action=ReplanAction.FAIL, reason="政策检索失败",
+                ).model_dump(mode="json"))
+                return OrderStateUpdate(reply=policy_reply(state, emit))
             # endregion
 
             # region 核验政策候选并记录本轮证据
             step = current_step(state)
             assert isinstance(step, PolicyStep)
             results = [*state.policy_results, observation.policy_result]
-            order_result = state.order_result
-            if (
-                # 本轮已查询到可信的本人订单事实。
-                order_result is not None
-                # 回执包含可用的订单详情。
-                and order_result.order is not None
-            ):
+            qualification = state.denial_qualification or state.policy_qualification
+            if qualification is not None:
 
-                # region 资格咨询和办理从本轮候选提取语义并核对可信事实
+                # region 从正式候选提取规则，核对订单事实和程序资格结论
                 answer = answer_eligibility(
-                    decide, state.question, step.query, results, order_result,
-                    handling=state.refund_authorization is not None,
+                    decide, state.question, step.query, results, state.order_result,
+                    qualification=qualification, handling=state.refund_authorization is not None,
+                    policy_question=explicit_policy_question(state),
                 )
-                reply = eligibility_reply(
-                    order_result, answer.policy_message, handling=state.refund_authorization is not None,
-                ) if answer.policy_message is not None else None
+                reply = policy_reply(state, emit, answer.policy_message) if answer.policy_message is not None else None
                 evidence = answer.evidence
                 retry = answer.retry_query
                 # endregion
@@ -411,6 +463,8 @@ def create_investigation_nodes(
 
                 # region 普通政策咨询保留按问题选择依据的流程
                 reply, evidence, retry = answer_policy(decide, state.question, step.query, results)
+                if reply is not None:
+                    reply = policy_reply(state, emit, reply)
                 # endregion
 
             observation = observation.model_copy()
@@ -427,35 +481,26 @@ def create_investigation_nodes(
                 # 本轮调查尚未安排政策补查。
                 and not state.retry_query
             ):
-                emit("replan", decision=ReplanDecision(action=ReplanAction.CONTINUE, reason="仅补查一次正式条款").model_dump(mode="json"))
+                emit(InvestigationEvent.REPLAN.value, decision=ReplanDecision(
+                    action=ReplanAction.CONTINUE, reason="仅补查一次正式条款",
+                ).model_dump(mode="json"))
                 return OrderStateUpdate(retry_query=retry, policy_results=results, observation=observation)
             # endregion
 
             # region 结束政策调查并返回答复或依据不足提示
-            emit("replan", decision=ReplanDecision(
+            emit(InvestigationEvent.REPLAN.value, decision=ReplanDecision(
                 action=ReplanAction.FAIL if evidence.status is PolicyEvidenceStatus.CONFLICT or not reply
                 else ReplanAction.FINISH, reason=evidence.status.value,
             ).model_dump(mode="json"))
-            if (
-                # 本轮持有明确办理授权。
-                state.refund_authorization is not None
-                # 订单未因资格规则被拒，可以准备固定复核。
-                and state.refund_result is None
-                # 政策调查返回可用正式条款。
-                and evidence.status is PolicyEvidenceStatus.SUFFICIENT
-            ):
-
-                # region 本轮已有可办理依据时交由固定节点复核
-                return OrderStateUpdate(observation=observation, policy_results=results)
-                # endregion
-
-            fallback = policy_failure_reply(state, fallback=NO_EVIDENCE)
-            return OrderStateUpdate(reply=reply or fallback, observation=observation, policy_results=results)
+            explicit = state.decision is not None and state.decision.policy_request is not None
+            fallback = POLICY_UNAVAILABLE if qualification is not None or explicit else NO_EVIDENCE
+            return OrderStateUpdate(reply=reply or policy_reply(state, emit, fallback), observation=observation,
+                                    policy_results=results)
             # endregion
 
         # endregion
 
-        # region 资格咨询仅在取得本人订单事实时继续检索，否则按查单结果结束
+        # region 已授权时先检查本人订单、原退款及未决提交
         result = observation.order_result
         assert result is not None
         if state.refund_authorization is not None:
@@ -464,11 +509,12 @@ def create_investigation_nodes(
             assert refund is not None
             refund_result = refund.preflight(state.refund_authorization, result, state.trace_id)
             if refund_result is not None:
-                if refund_result.is_order_state_denial:
+                denial = refund_result.order_state_denial
+                if denial is not None:
 
                     # region 订单因支付或发货状态被拒时保留结果并调查正式条款
-                    emit(RefundEvent.RESULT.value, result=refund_result.model_dump(mode="json"))
-                    return OrderStateUpdate(refund_result=refund_result, step_index=state.step_index + 1)
+                    return investigate_order_policy(state, denial, order_result=result, refund_result=refund_result,
+                                                    denial=True)
                     # endregion
 
                 # region 已有退款结果或无法操作时直接回复该业务结果
@@ -477,18 +523,40 @@ def create_investigation_nodes(
 
             # endregion
 
-        if len(state.plan.steps) == 2:
-            if result.order is not None:
+            # region 初查允许办理时进入独立的业务复核
+            decision = ReplanDecision(action=ReplanAction.CONTINUE, reason="初查允许办理，复核本人订单")
+            emit(InvestigationEvent.REPLAN.value, decision=decision.model_dump(mode="json"))
+            return OrderStateUpdate(replan_decision=decision)
+            # endregion
 
-                # region 已取得本人订单事实时进入政策检索
-                emit("replan", decision=ReplanDecision(
-                    action=ReplanAction.CONTINUE, reason="结合本人订单事实检索政策",
-                ).model_dump(mode="json"))
-                return OrderStateUpdate(step_index=state.step_index + 1)
+        # endregion
+
+        # region 对取得可信订单事实的资格咨询直接判断资格
+        order = result.order
+        if (
+            # 本轮是只读资格咨询。
+            state.decision is not None
+            and state.decision.order_goal is OrderGoal.ELIGIBILITY
+            # 本轮已经从订单服务取得本人订单事实。
+            and result.status is OrderQueryStatus.FOUND
+            and order is not None
+        ):
+            qualification = qualify_refund(payment_status=order.payment_status, shipping_status=order.shipping_status,
+                                           refund_status=order.refund_status)
+            if (
+                # 订单符合退款资格。
+                qualification is RefundQualification.ELIGIBLE
+                # 普通资格咨询没有请求政策依据。
+                and state.decision.policy_request is None
+            ):
+
+                # region 合格咨询按业务事实答复，省去政策调查
+                return OrderStateUpdate(reply=eligibility_reply(result, qualification))
                 # endregion
 
-            # region 缺少本人订单事实时按查单结果结束
-            return OrderStateUpdate(reply=order_reply(result))
+            # region 有明确资格拒绝或消费者要求依据时调查正式条款
+            return investigate_order_policy(state, qualification, order_result=result,
+                                            denial=qualification is not RefundQualification.ELIGIBLE)
             # endregion
 
         # endregion
@@ -506,65 +574,75 @@ def create_investigation_nodes(
             decision = ReplanDecision(action=ReplanAction.FINISH, reason="唯一的查单步骤已结束")
             # endregion
 
-        emit("replan", decision=decision.model_dump(mode="json"))
+        emit(InvestigationEvent.REPLAN.value, decision=decision.model_dump(mode="json"))
         return OrderStateUpdate(replan_decision=decision, reply=order_reply(result, detail=state.response_detail))
         # endregion
 
     # endregion
 
     # region 定义复核、受控发送及确定性回复节点
-    # 本轮授权和政策依据齐备时，重查订单并保存最终核验事件。
+    # 重查本人订单，按最新事实复核授权对应的办理资格。
     def review_refund(state: OrderState) -> OrderStateUpdate:
 
         # region 将已核验的本轮输入交给固定业务能力进行最终复核
         assert refund is not None
         assert state.refund_authorization is not None
-        assert state.observation is not None
-        assert state.observation.policy_evidence is not None
         current = refund.read_current_order(state.refund_authorization, state.trace_id)
-        result = refund.review(state.refund_authorization, state.observation.policy_evidence,
-                               state.policy_results, state.trace_id, current)
-        if isinstance(result, RefundPolicyVerification):
+        result = refund.review(state.refund_authorization, state.trace_id, current)
+        if isinstance(result, PreparedRefund):
 
-            # region 复核事件已确认持久保存时准备受控发送
-            return OrderStateUpdate(refund_verification=result)
+            # region 最新状态仍允许办理时准备受控发送
+            return OrderStateUpdate(prepared_refund=result, order_result=current)
             # endregion
 
-        if result.is_order_state_denial:
+        denial = result.order_state_denial
+        if denial is not None:
 
-            # region 复核发现资格变化时按最新订单事实在同一快照检索拒绝依据
-            emit(RefundEvent.RESULT.value, result=result.model_dump(mode="json"))
-            return OrderStateUpdate(refund_result=result, order_result=current, retry_query=None)
+            # region 复核发现资格变化时按最新订单事实调查拒绝依据
+            assert current is not None
+            return investigate_order_policy(state, denial, order_result=current, refund_result=result, denial=True)
             # endregion
 
-        return OrderStateUpdate(refund_result=result)
+        return OrderStateUpdate(refund_result=result, order_result=current)
         # endregion
 
-    # 仅对活跃会话轮次的持久核验事件尝试发送一次，拒绝 checkpoint 自动重放。
+    # 仅对活跃会话轮次完成复核的提交尝试发送一次，拒绝 checkpoint 自动重放。
     def send_refund(state: OrderState) -> OrderStateUpdate:
 
-        # region 验证当前正在处理原授权轮次及其政策核验事件
-        event = state.refund_verification
+        # region 验证当前正在处理原授权轮次及其已复核的提交信息
+        prepared = state.prepared_refund
         if (
             # 图正在恢复而没有本轮消费者输入。
             is_live is None
             # 该轮不是当前 CLI 正在处理的输入。
             or not is_live(state.trace_id)
-            # 没有确认保存的本轮政策核验事件。
-            or event is None
-            # 事件来自其他轮次的追踪标识。
-            or event.trace_id != state.trace_id
-            # 事件关联的办理授权与当前授权不一致。
-            or event.authorization != state.refund_authorization
+            # 本轮没有已复核的提交信息。
+            or prepared is None
+            # 提交来自其他轮次的追踪标识。
+            or prepared.trace_id != state.trace_id
+            # 提交关联的办理授权与当前授权不一致。
+            or prepared.authorization != state.refund_authorization
         ):
+
+            # region 轮次或授权不匹配时返回待核对结果
             return OrderStateUpdate(refund_result=RefundResult(
                 status=RefundOutcome.UNCONFIRMED, reason=RefundReason.RECEIPT_UNKNOWN,
             ))
+            # endregion
+
         # endregion
 
         # region 使用当前有效提交继续单次发送
         assert refund is not None
-        return OrderStateUpdate(refund_result=refund.send(event))
+        result = refund.send(prepared)
+        denial = result.order_state_denial
+        if denial is not None:
+
+            # region 事务已结束且确认资格拒绝时按该次回执调查政策
+            return investigate_order_policy(state, denial, refund_result=result, denial=True)
+            # endregion
+
+        return OrderStateUpdate(refund_result=result)
         # endregion
 
     # 根据真实业务回执输出消费者回复，不再调用模型。
@@ -573,6 +651,45 @@ def create_investigation_nodes(
         # region 记录业务结果并按确定性模板生成回复
         result = state.refund_result
         assert result is not None
+        if (
+            # 本轮已经处理办理请求。
+            state.decision is not None
+            # 消费者同时要求解释退款依据。
+            and state.decision.policy_request is PolicyRequest.BASIS
+        ):
+
+            # region 取得真实退款单后，按可核实的办理前事实调查政策
+            order_result = state.order_result
+            order = order_result.order if order_result is not None else None
+            if (
+                # 办理已经确认退款单及其目标。
+                result.refund is not None
+                # 最新一次已核验的本人订单与退款单一致。
+                and order is not None
+                # 真实回执属于该订单。
+                and result.refund.order_id == order.order_id
+            ):
+                qualification = qualify_refund(payment_status=order.payment_status,
+                                               shipping_status=order.shipping_status,
+                                               refund_status=order.refund_status)
+                if (
+                    # 退款成功以提交前已核验的合格状态解释。
+                    result.status is RefundOutcome.SIMULATED_SUCCEEDED
+                    # 回复原退款时，已有退款状态也经过可信查单核实。
+                    or qualification is RefundQualification.ALREADY_REFUNDED
+                ):
+
+                    # region 按真实退款单和已核验的资格追加只读调查
+                    return investigate_order_policy(state, qualification, order_result=order_result,
+                                                    refund_result=result)
+                    # endregion
+            # endregion
+
+            # region 缺少可解释的资格事实时保留业务回执并说明依据不可核实
+            emit(RefundEvent.RESULT.value, result=result.model_dump(mode="json"))
+            return OrderStateUpdate(reply=policy_reply(state, emit))
+            # endregion
+
         emit(RefundEvent.RESULT.value, result=result.model_dump(mode="json"))
         return OrderStateUpdate(reply=refund_reply(result, emit))
         # endregion
@@ -594,66 +711,86 @@ def create_investigation_nodes(
     # endregion
 
 
-# 在政策不可用时保留资格咨询和办理中已确认的订单事实。
-def policy_failure_reply(state: OrderState, *, fallback: str = POLICY_UNAVAILABLE) -> str:
+# 在已确认的业务结果后附上核验的依据或政策降级说明。
+def policy_reply(state: OrderState, emit: Callable[..., None], message: str = POLICY_UNAVAILABLE) -> str:
 
-    # region 资格咨询或办理已查到本人订单时保留可信订单事实
+    # region 提交前拒绝或只读资格咨询使用可信的查单事实
+    qualification = state.denial_qualification or state.policy_qualification
     if (
-        # 本轮已有解析后的咨询意图。
-        state.decision is not None
-        and (
-            # 本轮询问指定订单的退款资格。
-            state.decision.order_goal is OrderGoal.ELIGIBILITY
-            # 本轮明确授权办理指定订单。
-            or state.refund_authorization is not None
-        )
-        # 本轮调查获得了该订单的查单回执。
-        and state.order_result is not None
-        # 查单确认了订单归属及业务事实。
+        # 当前有经过核验的订单回执。
+        state.order_result is not None
+        # 回执包含可信本人订单详情。
         and state.order_result.order is not None
-    ):
-        return eligibility_reply(
-            state.order_result, POLICY_UNAVAILABLE, handling=state.refund_authorization is not None,
+        # 本次政策调查采用了已核验的资格。
+        and qualification is not None
+        # 需要展示本人订单事实和资格结论。
+        and (
+            # 本轮只读，未进入办理。
+            state.refund_result is None
+            # 本轮办理在提交前已按该资格被拒。
+            or state.denial_qualification is not None
         )
+    ):
+
+        # region 以查单事实解释退款资格并附政策说明
+        message = eligibility_reply(
+            state.order_result, qualification, message, handling=state.refund_authorization is not None,
+        )
+        # endregion
+
+    elif state.refund_result is not None:
+
+        # region 已有办理回执时先回复真实结果，再解释政策
+        message = f"{refund_reply(state.refund_result, emit)}\n{message}"
+        # endregion
+
     # endregion
 
-    # region 没有可展示的资格事实时保留原政策提示
-    return fallback
+    # region 等待条款时告知本轮未提交及后续明确办理所需的输入
+    if (
+        # 本轮已识别到政策调查意图。
+        state.decision is not None
+        # 消费者要先看条款或把正式条款设为前提。
+        and state.decision.policy_request is PolicyRequest.BEFORE_REFUND
+    ):
+
+        # region 等待条款的消费者可在后续消息重新明确授权
+        return f"{message}\n本轮未提交退款。如要办理，请在同一条新消息中明确要求退款，并写出唯一的演示订单编号。"
+        # endregion
+
+    return message
     # endregion
 
 
 # 按失败的调查步骤和消费者意图生成本轮降级回复。
-def investigation_failure(node: OrderFlowNode, state: OrderState) -> OrderStateUpdate:
+def investigation_failure(node: OrderFlowNode, state: OrderState, emit: Callable[..., None]) -> OrderStateUpdate:
 
-    # region 意图识别失败时保留问题并提示本轮未能查单
+    # region 意图识别失败时保留待补号问题并提示本轮未能查单
     if node is OrderFlowNode.INTENT:
-        return OrderStateUpdate(question=state.question, reply=ORDER_QUERY_INCOMPLETE)
+        return OrderStateUpdate(question=state.question, eligibility_question=state.eligibility_question,
+                                reply=ORDER_QUERY_INCOMPLETE)
     # endregion
 
-    # region 政策或订单资格咨询失败时提示政策暂不可用
+    # region 政策调查失败时保留已确认的资格或办理结果
     if (
-        # 本轮已经识别出消费者的咨询意图。
-        state.decision
-        # 本轮问题需要退款政策依据。
-        and (
-            # 消费者直接询问退款政策。
-            state.decision.intent is ConversationIntent.POLICY_QUESTION
-            # 消费者询问某笔订单的退款资格。
-            or state.decision.order_goal is OrderGoal.ELIGIBILITY
-            # 本轮办理在政策调查期间失败，尚未进入最终复核及执行。
-            or (
-                # 当前轮次持有消费者办理授权。
-                state.refund_authorization is not None
-                # 失败发生在政策调查阶段。
-                and node in (OrderFlowNode.EXECUTE, OrderFlowNode.OBSERVE, OrderFlowNode.REPLAN)
-                # 当前轮次已建立调查计划。
-                and state.plan is not None
-                # 当前执行的是计划中的政策检索步骤。
-                and isinstance(state.plan.steps[state.step_index], PolicyStep)
-            )
+        # 执行失败前已确认需要解释的拒绝原因。
+        state.denial_qualification is not None
+        # 本轮正在执行已安排的只读政策步骤。
+        or (
+            # 本轮已生成调查计划。
+            state.plan is not None
+            # 当前执行的是政策检索或解释。
+            and isinstance(state.plan.steps[state.step_index], PolicyStep)
+        )
+        # 当前消费者直接询问通用政策。
+        or (
+            # 本轮已有明确的意图。
+            state.decision is not None
+            # 该意图是通用政策咨询。
+            and state.decision.intent is ConversationIntent.POLICY_QUESTION
         )
     ):
-        return OrderStateUpdate(reply=policy_failure_reply(state))
+        return OrderStateUpdate(reply=policy_reply(state, emit))
     # endregion
 
     # region 其他调查失败时提示本轮未能查单

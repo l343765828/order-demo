@@ -18,7 +18,6 @@ from utils.checkpoint import open_mysql_checkpointer
 from utils.database import create_mysql_engine
 from utils.events import log_event
 from utils.mysql import connection_config
-from workflows.refund_checkpoint import RefundCheckpointSaver
 
 
 # 解析命令行参数，初始化存储并运行会话；返回进程退出码。
@@ -45,9 +44,7 @@ def main() -> int:
     try:
         settings = load_config()
         mysql = settings.mysql
-        with open_mysql_checkpointer(
-            mysql.database, saver_type=RefundCheckpointSaver, **connection_config(mysql),
-        ) as saver:
+        with open_mysql_checkpointer(mysql.database, **connection_config(mysql)) as saver:
 
             # region 仅初始化检查点时创建所需表并退出
             if args.init_checkpoints:

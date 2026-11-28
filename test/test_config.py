@@ -52,16 +52,19 @@ def test_shipped_config_includes_all_three_models():
     assert config.reranker is not None
 
 
-@pytest.mark.parametrize("legacy_fields", [{}, {"api_key": "legacy-test-value"}])
-def test_loads_order_only_config_and_ignores_legacy_qwen_key(settings, config_file, legacy_fields):
+def test_loads_order_only_config(settings, config_file):
     for section in ("policy", "embedding", "reranker"):
         settings.pop(section)
-    settings["qwen"].update(legacy_fields)
     config = load_config(config_file(settings))
     assert config.mysql.host == "db"
     assert config.mcp.read_token == "x" * 32
     assert config.policy is config.embedding is config.reranker is None
-    assert not hasattr(config.qwen, "api_key")
+
+
+def test_rejects_removed_qwen_api_key(settings, config_file):
+    settings["qwen"]["api_key"] = "legacy-test-value"
+    with pytest.raises(ValueError, match="无法加载配置"):
+        load_config(config_file(settings))
 
 
 @pytest.mark.parametrize("section", ["embedding", "reranker"])
